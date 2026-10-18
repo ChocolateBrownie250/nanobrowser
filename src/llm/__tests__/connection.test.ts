@@ -171,6 +171,19 @@ describe('listModels', () => {
     });
   });
 
+  it("Z.ai: lists with the key as a bearer token and x-api-key, and falls back to the Coding Plan's models", async () => {
+    const fetch = vi.fn(async (url: string, init: RequestInit) => {
+      expect(url).toBe('https://api.z.ai/api/anthropic/v1/models?limit=100');
+      const headers = init.headers as Record<string, string>;
+      expect(headers.authorization).toBe('Bearer z');
+      expect(headers['x-api-key']).toBe('z');
+      return Response.json({ code: 200, success: true });
+    }) as unknown as typeof globalThis.fetch;
+    expect(
+      await listModels({ kind: 'anthropic', apiKey: 'z', baseUrl: 'https://api.z.ai/api/anthropic/v1' }, fetch),
+    ).toEqual({ models: ['glm-5.3', 'glm-5.3-flash'], hidden: [] });
+  });
+
   it('throws with originRefused on 403', async () => {
     const fetch = vi.fn(
       async () => new Response('', { status: 403, statusText: 'Forbidden' }),

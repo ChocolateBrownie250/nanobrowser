@@ -35,6 +35,32 @@ export interface CreateModelOptions {
   fetch?: typeof fetch;
 }
 
+/** Z.ai's Anthropic-compatible endpoint for the GLM Coding Plan, the address its Claude Code guide gives plus `/v1`. */
+export const ZAI_ANTHROPIC_BASE_URL = 'https://api.z.ai/api/anthropic/v1';
+
+/** The GLM models of the Coding Plan, offered when Z.ai's model list comes back without them. */
+export const ZAI_MODELS: readonly string[] = ['glm-5.3', 'glm-5.3-flash'];
+
+/** Whether an Anthropic-kind base URL is Z.ai's. */
+export function isZai(baseUrl?: string): boolean {
+  try {
+    return !!baseUrl && new URL(baseUrl).hostname === 'api.z.ai';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The key headers of an Anthropic-kind request. Z.ai's guide passes the key as a bearer token (Claude Code's
+ * `ANTHROPIC_AUTH_TOKEN`), so for Z.ai it goes in both `Authorization` and `x-api-key`.
+ */
+export function anthropicKeyHeaders(apiKey: string | undefined, baseUrl?: string): Record<string, string> {
+  return {
+    'x-api-key': apiKey ?? '',
+    ...(isZai(baseUrl) && apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
+  };
+}
+
 export const DEFAULT_BASE_URLS: Partial<Record<ProviderKind, string>> = {
   ollama: 'http://localhost:11434/v1',
   lmstudio: 'http://localhost:1234/v1',
@@ -72,10 +98,14 @@ export function createModel(spec: ModelSpec, options: CreateModelOptions = {}): 
   switch (kind) {
     case 'anthropic': {
       const anthropic = createAnthropic({
-        apiKey,
+        // Z.ai takes the key as a bearer token; the SDK then leaves out x-api-key, which is added back with it.
+        ...(isZai(spec.baseUrl) ? { authToken: apiKey } : { apiKey }),
         ...(spec.baseUrl ? { baseURL: spec.baseUrl } : {}),
         // The service worker sends an Origin header, so Anthropic requires this opt-in for browser access.
-        headers: { 'anthropic-dangerous-direct-browser-access': 'true' },
+        headers: {
+          'anthropic-dangerous-direct-browser-access': 'true',
+          ...(isZai(spec.baseUrl) ? anthropicKeyHeaders(apiKey, spec.baseUrl) : {}),
+        },
         fetch,
       });
       // The prompt cache, switched on for the whole request: the API places the breakpoint itself.

@@ -3,7 +3,7 @@
 // src/llm from this page; settings are written through chrome.storage, with no worker command.
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { KeyboardEvent, ReactNode } from 'react';
-import { listModels } from '@src/llm';
+import { listModels, ZAI_ANTHROPIC_BASE_URL } from '@src/llm';
 import type { ConnectionResult, ModelList, ProviderKind } from '@src/llm';
 import type { ReasoningEffort } from '@src/llm/catalogue';
 import {
@@ -41,14 +41,14 @@ const EMPTY_PROVIDERS: ProviderConfig[] = [];
 const EMPTY_KEYS: Record<string, string> = {};
 
 /**
- * Presets: cloud endpoints that speak chat completions, added as OpenAI-compatible providers but listed and named as
- * providers of their own.
+ * Presets: cloud endpoints listed and named as providers of their own. Most speak chat completions and are added as
+ * OpenAI-compatible providers; Z.ai's Coding Plan is added as an Anthropic provider at its Anthropic-compatible address.
  */
-const PRESETS: Array<{ id: string; label: string; baseUrl: string }> = [
+const PRESETS: Array<{ id: string; label: string; baseUrl: string; kind?: ProviderKind }> = [
   { id: 'xai', label: 'xAI Grok', baseUrl: 'https://api.x.ai/v1' },
   { id: 'deepseek', label: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1' },
   { id: 'mistral', label: 'Mistral', baseUrl: 'https://api.mistral.ai/v1' },
-  { id: 'zai', label: 'Z.ai GLM (Coding Plan)', baseUrl: 'https://api.z.ai/api/coding/paas/v4' },
+  { id: 'zai', label: 'Z.ai GLM (Coding Plan)', baseUrl: ZAI_ANTHROPIC_BASE_URL, kind: 'anthropic' },
 ];
 
 /**
@@ -84,7 +84,7 @@ export function ProvidersSection() {
 
   const add = async (choice: string) => {
     const preset = PRESETS.find(p => p.id === choice);
-    const kind = preset ? 'openai-compatible' : (choice as ProviderKind);
+    const kind = preset ? (preset.kind ?? 'openai-compatible') : (choice as ProviderKind);
     const info = kindInfo(kind);
     const provider: ProviderConfig = {
       id: newId(),

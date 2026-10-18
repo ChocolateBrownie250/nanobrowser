@@ -54,6 +54,19 @@ describe('providers', () => {
     expect(r.body.max_tokens).toBe(1000);
   });
 
+  it('Z.ai: the Anthropic messages endpoint at its address, the key as a bearer token and x-api-key', async () => {
+    const r = await capture({
+      kind: 'anthropic',
+      modelName: 'glm-5.3',
+      apiKey: 'z',
+      baseUrl: 'https://api.z.ai/api/anthropic/v1',
+    });
+    expect(r.url).toBe('https://api.z.ai/api/anthropic/v1/messages');
+    expect(r.headers.get('authorization')).toBe('Bearer z');
+    expect(r.headers.get('x-api-key')).toBe('z');
+    expect(r.body.model).toBe('glm-5.3');
+  });
+
   it('Gemini: streamGenerateContent with the key header', async () => {
     const r = await capture({ kind: 'gemini', modelName: 'gemini-3-flash', apiKey: 'g' });
     expect(r.url).toContain('generativelanguage.googleapis.com');
