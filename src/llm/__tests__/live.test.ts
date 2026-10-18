@@ -4,10 +4,11 @@
 import { describe, expect, it } from 'vitest';
 import { createModel, ZAI_ANTHROPIC_BASE_URL } from '../providers';
 import type { ProviderKind } from '../providers';
+import type { WireEffort } from '../catalogue';
 import { streamTurn } from '../stream';
 
 const live = process.env.NB_LIVE === '1';
-const cases: Array<{ kind: ProviderKind; model: string; key?: string; baseUrl?: string }> = [
+const cases: Array<{ kind: ProviderKind; model: string; key?: string; baseUrl?: string; reasoning?: WireEffort }> = [
   {
     kind: 'anthropic',
     model: process.env.NB_LIVE_ANTHROPIC ?? 'claude-haiku-4-5-20251001',
@@ -20,11 +21,12 @@ const cases: Array<{ kind: ProviderKind; model: string; key?: string; baseUrl?: 
     key: process.env.GEMINI_API_KEY ?? process.env.GOOGLE_GENERATIVE_AI_API_KEY,
   },
   {
-    // Z.ai's GLM Coding Plan through its Anthropic-compatible endpoint.
+    // Z.ai's GLM Coding Plan through its Anthropic-compatible endpoint, with an effort as the run sends one.
     kind: 'anthropic',
     model: process.env.NB_LIVE_ZAI ?? 'glm-5.3',
     key: process.env.ZAI_API_KEY,
     baseUrl: ZAI_ANTHROPIC_BASE_URL,
+    reasoning: 'low',
   },
   {
     kind: 'openrouter',
@@ -48,7 +50,7 @@ const tools = {
 describe.skipIf(!live)('live providers', () => {
   it.each(cases)(
     '$kind $model streams a tool call',
-    async ({ kind, model, key, baseUrl }) => {
+    async ({ kind, model, key, baseUrl, reasoning }) => {
       expect(key, `no key for ${kind}`).toBeTruthy();
       let deltas = 0;
       const result = await streamTurn({
@@ -56,6 +58,7 @@ describe.skipIf(!live)('live providers', () => {
         system: 'You operate a web page through tools. Always act with a tool call.',
         messages: [{ role: 'user', content: 'Click the element with ref e7.' }],
         tools,
+        ...(reasoning ? { reasoning } : {}),
         onTextDelta: () => deltas++,
       });
       console.info(kind, model, result.finish, JSON.stringify(result.toolCalls), result.usage, result.error?.message);

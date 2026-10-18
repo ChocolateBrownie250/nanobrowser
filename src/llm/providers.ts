@@ -5,6 +5,7 @@ import { createAnthropic } from '@ai-sdk/anthropic';
 import { createGoogle } from '@ai-sdk/google';
 import { createOpenAI } from '@ai-sdk/openai';
 import type { LanguageModel } from 'ai';
+import type { WireEffort } from './catalogue';
 
 export type ProviderKind =
   'anthropic' | 'openai' | 'gemini' | 'openai-compatible' | 'ollama' | 'lmstudio' | 'openrouter';
@@ -26,6 +27,11 @@ export interface ChatModel {
   spec: ModelSpec;
   model: LanguageModel;
   providerOptions?: ProviderOptions;
+  /**
+   * For a server that takes the effort as a provider option rather than through the SDK's `reasoning`: the provider
+   * options carrying it, sent in place of `providerOptions` with `reasoning` left out. Undefined keeps the SDK's way.
+   */
+  reasoningOptions?: (reasoning: WireEffort) => ProviderOptions | undefined;
   /** The cost of the latest response, when the provider reports one the SDK does not pass on (OpenRouter). */
   takeCost?: () => Promise<number | undefined>;
 }
@@ -59,6 +65,17 @@ export function anthropicKeyHeaders(apiKey: string | undefined, baseUrl?: string
     'x-api-key': apiKey ?? '',
     ...(isZai(baseUrl) && apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
   };
+}
+
+/**
+ * Z.ai's GLM effort, sent as `output_config.effort`. Its endpoint varies GLM's thinking only by that field and ignores
+ * `thinking.budget_tokens`, which the SDK would otherwise send for a model it does not know. The SDK's effort has no
+ * `minimal`; None keeps the SDK's disabled thinking.
+ */
+function zaiReasoningOptions(reasoning: WireEffort): ProviderOptions | undefined {
+  if (reasoning === 'none') return undefined;
+  const effort = reasoning === 'minimal' ? 'low' : reasoning;
+  return { anthropic: { cacheControl: { type: 'ephemeral' }, effort } };
 }
 
 export const DEFAULT_BASE_URLS: Partial<Record<ProviderKind, string>> = {
@@ -113,6 +130,7 @@ export function createModel(spec: ModelSpec, options: CreateModelOptions = {}): 
         spec,
         model: anthropic(modelName),
         providerOptions: { anthropic: { cacheControl: { type: 'ephemeral' } } },
+        ...(isZai(spec.baseUrl) ? { reasoningOptions: zaiReasoningOptions } : {}),
       };
     }
     case 'gemini': {

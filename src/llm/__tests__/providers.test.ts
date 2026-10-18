@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createModel, openAICompatibleBaseUrl } from '../providers';
 import type { ModelSpec } from '../providers';
+import type { WireEffort } from '../catalogue';
 import { streamTurn } from '../stream';
 
 interface Captured {
@@ -30,13 +31,14 @@ const tools = {
   done: { description: 'Finish', parameters: { type: 'object', properties: { summary: { type: 'string' } } } },
 };
 
-async function capture(spec: ModelSpec): Promise<Captured> {
+async function capture(spec: ModelSpec, reasoning?: WireEffort): Promise<Captured> {
   const { fetch, requests } = captureFetch();
   const result = await streamTurn({
     chat: createModel(spec, { fetch }),
     system: 'You are a test.',
     messages: [{ role: 'user', content: 'hi' }],
     tools,
+    ...(reasoning ? { reasoning } : {}),
   });
   expect(result.finish).toBe('error');
   expect(requests).toHaveLength(1);
@@ -65,6 +67,27 @@ describe('providers', () => {
     expect(r.headers.get('authorization')).toBe('Bearer z');
     expect(r.headers.get('x-api-key')).toBe('z');
     expect(r.body.model).toBe('glm-5.3');
+  });
+
+  it('Z.ai: the effort goes as output_config.effort, with no thinking budget', async () => {
+    const zai = { kind: 'anthropic', modelName: 'glm-5.3', apiKey: 'z', baseUrl: 'https://api.z.ai/api/anthropic/v1' };
+    for (const [sent, effort] of [
+      ['low', 'low'],
+      ['high', 'high'],
+      ['xhigh', 'xhigh'],
+      ['minimal', 'low'],
+    ] as const) {
+      const r = await capture(zai as ModelSpec, sent);
+      expect(r.body.output_config).toEqual({ effort });
+      expect(r.body).not.toHaveProperty('thinking');
+      expect(r.body.cache_control).toEqual({ type: 'ephemeral' });
+    }
+  });
+
+  it("Anthropic: the effort stays the SDK's reasoning option off Z.ai", async () => {
+    const r = await capture({ kind: 'anthropic', modelName: 'claude-sonnet-4-5', apiKey: 'k' }, 'low');
+    expect(r.body.thinking).toMatchObject({ type: 'enabled' });
+    expect(r.body).not.toHaveProperty('output_config');
   });
 
   it('Gemini: streamGenerateContent with the key header', async () => {
