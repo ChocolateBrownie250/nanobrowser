@@ -48,6 +48,7 @@ const PRESETS: Array<{ id: string; label: string; baseUrl: string }> = [
   { id: 'xai', label: 'xAI Grok', baseUrl: 'https://api.x.ai/v1' },
   { id: 'deepseek', label: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1' },
   { id: 'mistral', label: 'Mistral', baseUrl: 'https://api.mistral.ai/v1' },
+  { id: 'zai', label: 'Z.ai GLM (Coding Plan)', baseUrl: 'https://api.z.ai/api/coding/paas/v4' },
 ];
 
 /**
