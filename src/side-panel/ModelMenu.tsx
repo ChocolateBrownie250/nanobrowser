@@ -1,7 +1,7 @@
 // The composer's model picker: a menu built like the mode menu, with the models and, under them, the reasoning effort
 // as one row of pills.
 import { useEffect, useRef, useState } from 'react';
-import type { ReasoningEffort, ReasoningSupport } from '@src/llm/catalogue';
+import type { EffortLabel, ReasoningEffort, ReasoningSupport } from '@src/llm/catalogue';
 import type { ModelRef } from '@src/store/types';
 import { t } from '@src/ui/i18n';
 import { CheckIcon, ChevronIcon } from '@src/ui/icons';
@@ -14,6 +14,13 @@ export interface ModelChoice {
   name: string;
   /** Whether the model reasons; absent when unknown. */
   capability?: ReasoningSupport;
+  /** The vendor's names for the efforts, where they differ from Low, Medium and High. */
+  labels?: Partial<Record<ReasoningEffort, EffortLabel>>;
+}
+
+/** The text of an effort for a model: the vendor's name where its row gives one. */
+export function effortText(effort: ReasoningEffort, labels?: Partial<Record<ReasoningEffort, EffortLabel>>): string {
+  return t(`reasoning.${labels?.[effort] ?? effort}`);
 }
 
 const ALL: ReasoningEffort[] = ['none', 'low', 'medium', 'high'];
@@ -88,7 +95,7 @@ export function ModelMenu({
         ref={button}
         type="button"
         disabled={!models.length}
-        aria-label={`${t('composer.model')}: ${label}${showEffort && row ? ` · ${t(`reasoning.${row.shown}`)}` : ''}`}
+        aria-label={`${t('composer.model')}: ${label}${showEffort && row ? ` · ${effortText(row.shown, chosen?.labels)}` : ''}`}
         aria-haspopup="menu"
         aria-expanded={open}
         data-label={t('composer.model')}
@@ -98,7 +105,9 @@ export function ModelMenu({
         <span className="truncate">{label}</span>
         {/* In a narrow panel the effort goes first, then the name is cut. */}
         {showEffort && row ? (
-          <span className="shrink-0 whitespace-nowrap max-[340px]:hidden">· {t(`reasoning.${row.shown}`)}</span>
+          <span className="shrink-0 whitespace-nowrap max-[340px]:hidden">
+            · {effortText(row.shown, chosen?.labels)}
+          </span>
         ) : null}
         <ChevronIcon size={12} className={`shrink-0 transition-transform ${open ? '-rotate-90' : 'rotate-90'}`} />
       </button>
@@ -153,7 +162,15 @@ export function ModelMenu({
               </button>
             ))}
           </div>
-          {row ? <EffortRow row={row} value={reasoning} onReasoning={onReasoning} running={running} /> : null}
+          {row ? (
+            <EffortRow
+              row={row}
+              value={reasoning}
+              labels={chosen?.labels}
+              onReasoning={onReasoning}
+              running={running}
+            />
+          ) : null}
         </div>
       ) : null}
     </div>
@@ -164,10 +181,12 @@ export function ModelMenu({
 function EffortRow({
   row,
   value,
+  labels,
   running,
   onReasoning,
 }: {
   row: { pills: ReasoningEffort[]; shown: ReasoningEffort };
+  labels?: Partial<Record<ReasoningEffort, EffortLabel>>;
   /** The stored effort, which may differ from the pill shown (None on a model that cannot stop shows Low). */
   value: ReasoningEffort;
   running: boolean;
@@ -206,7 +225,7 @@ function EffortRow({
             onClick={() => {
               if (p !== value) onReasoning(p);
             }}>
-            {t(`reasoning.${p}`)}
+            {effortText(p, labels)}
           </button>
         ))}
       </div>

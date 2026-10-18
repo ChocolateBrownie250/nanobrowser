@@ -1,7 +1,14 @@
 // The side panel. A view: it draws the worker's events and sends commands; it holds no state a run depends on, and it
 // never reads the conversation stores.
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore } from 'react';
-import { capabilityOf, DEFAULT_SETTINGS, keysStorage, providersStorage, settingsStorage } from '@src/store/settings';
+import {
+  capabilityOf,
+  DEFAULT_SETTINGS,
+  effortLabelsOf,
+  keysStorage,
+  providersStorage,
+  settingsStorage,
+} from '@src/store/settings';
 import type { ProviderConfig } from '@src/store/settings';
 import type { LivePair, ModelRef, PermissionMode } from '@src/store/types';
 import { makePair } from '@src/llm/profiles';
@@ -182,7 +189,13 @@ export function App() {
           .filter(m => !m.noToolCalling)
           .map(m => {
             const ref = { providerId: p.id, model: m.name };
-            return { ref, label: `${m.name} · ${p.name}`, name: m.name, capability: capabilityOf(providers, ref) };
+            return {
+              ref,
+              label: `${m.name} · ${p.name}`,
+              name: m.name,
+              capability: capabilityOf(providers, ref),
+              labels: effortLabelsOf(providers, ref),
+            };
           }),
       ),
     [providers],

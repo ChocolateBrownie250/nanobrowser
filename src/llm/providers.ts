@@ -5,6 +5,7 @@ import { createAnthropic } from '@ai-sdk/anthropic';
 import { createGoogle } from '@ai-sdk/google';
 import { createOpenAI } from '@ai-sdk/openai';
 import type { LanguageModel } from 'ai';
+import type { WireEffort } from './catalogue';
 
 export type ProviderKind =
   'anthropic' | 'openai' | 'gemini' | 'openai-compatible' | 'ollama' | 'lmstudio' | 'openrouter';
@@ -26,6 +27,11 @@ export interface ChatModel {
   spec: ModelSpec;
   model: LanguageModel;
   providerOptions?: ProviderOptions;
+  /**
+   * For a server that takes the effort as a provider option rather than through the SDK's `reasoning`: the provider
+   * options carrying it, sent in place of `providerOptions` with `reasoning` left out. Undefined keeps the SDK's way.
+   */
+  reasoningOptions?: (reasoning: WireEffort) => ProviderOptions | undefined;
   /** The cost of the latest response, when the provider reports one the SDK does not pass on (OpenRouter). */
   takeCost?: () => Promise<number | undefined>;
 }
@@ -33,6 +39,44 @@ export interface ChatModel {
 export interface CreateModelOptions {
   /** Custom fetch, used by tests to inspect requests. */
   fetch?: typeof fetch;
+}
+
+/** Z.ai's Anthropic-compatible endpoint for the GLM Coding Plan, the address its Claude Code guide gives plus `/v1`. */
+export const ZAI_ANTHROPIC_BASE_URL = 'https://api.z.ai/api/anthropic/v1';
+
+/** The GLM models of the Coding Plan, offered when Z.ai's model list comes back without them. */
+export const ZAI_MODELS: readonly string[] = ['glm-5.3', 'glm-5.3-flash'];
+
+/** Whether an Anthropic-kind base URL is Z.ai's. */
+export function isZai(baseUrl?: string): boolean {
+  try {
+    return !!baseUrl && new URL(baseUrl).hostname === 'api.z.ai';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The key headers of an Anthropic-kind request. Z.ai's guide passes the key as a bearer token (Claude Code's
+ * `ANTHROPIC_AUTH_TOKEN`), so for Z.ai it goes in both `Authorization` and `x-api-key`.
+ */
+export function anthropicKeyHeaders(apiKey: string | undefined, baseUrl?: string): Record<string, string> {
+  return {
+    'x-api-key': apiKey ?? '',
+    ...(isZai(baseUrl) && apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
+  };
+}
+
+/**
+ * Z.ai's GLM effort, sent as `output_config.effort`. Its endpoint varies GLM's thinking only by that field and ignores
+ * `thinking.budget_tokens`, which the SDK would otherwise send for a model it does not know. GLM's levels are low, high
+ * and max (the catalogue maps the picker to them). The SDK's effort has no `minimal`; None keeps the SDK's disabled
+ * thinking.
+ */
+function zaiReasoningOptions(reasoning: WireEffort): ProviderOptions | undefined {
+  if (reasoning === 'none') return undefined;
+  const effort = reasoning === 'minimal' ? 'low' : reasoning;
+  return { anthropic: { cacheControl: { type: 'ephemeral' }, effort } };
 }
 
 export const DEFAULT_BASE_URLS: Partial<Record<ProviderKind, string>> = {
@@ -72,10 +116,14 @@ export function createModel(spec: ModelSpec, options: CreateModelOptions = {}): 
   switch (kind) {
     case 'anthropic': {
       const anthropic = createAnthropic({
-        apiKey,
+        // Z.ai takes the key as a bearer token; the SDK then leaves out x-api-key, which is added back with it.
+        ...(isZai(spec.baseUrl) ? { authToken: apiKey } : { apiKey }),
         ...(spec.baseUrl ? { baseURL: spec.baseUrl } : {}),
         // The service worker sends an Origin header, so Anthropic requires this opt-in for browser access.
-        headers: { 'anthropic-dangerous-direct-browser-access': 'true' },
+        headers: {
+          'anthropic-dangerous-direct-browser-access': 'true',
+          ...(isZai(spec.baseUrl) ? anthropicKeyHeaders(apiKey, spec.baseUrl) : {}),
+        },
         fetch,
       });
       // The prompt cache, switched on for the whole request: the API places the breakpoint itself.
@@ -83,6 +131,7 @@ export function createModel(spec: ModelSpec, options: CreateModelOptions = {}): 
         spec,
         model: anthropic(modelName),
         providerOptions: { anthropic: { cacheControl: { type: 'ephemeral' } } },
+        ...(isZai(spec.baseUrl) ? { reasoningOptions: zaiReasoningOptions } : {}),
       };
     }
     case 'gemini': {

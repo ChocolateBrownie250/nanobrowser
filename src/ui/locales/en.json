@@ -457,6 +457,7 @@
   "reasoning.low": "Low",
   "reasoning.medium": "Medium",
   "reasoning.high": "High",
+  "reasoning.max": "Max",
   "agent.reasoning": "Reasoning effort",
   "models.reasons": "reasons",
   "models.noReasoning": "does not reason",

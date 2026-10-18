@@ -1,7 +1,7 @@
 // What a vendor's model API says about a model: read when the model is tested, before any probe, at no cost in tokens.
 // One parser reads the fields any of the APIs return; a field the API does not state is left out, for the next source
 // to say.
-import { openAICompatibleBaseUrl } from './providers';
+import { anthropicKeyHeaders, openAICompatibleBaseUrl } from './providers';
 import type { ModelSpec } from './providers';
 import type { LearntFacts } from './profiles';
 
@@ -106,7 +106,7 @@ export async function readModelInfo(
     case 'anthropic':
       record = await get(`${spec.baseUrl || 'https://api.anthropic.com/v1'}/models/${id}`, {
         headers: {
-          'x-api-key': spec.apiKey ?? '',
+          ...anthropicKeyHeaders(spec.apiKey, spec.baseUrl),
           'anthropic-version': '2023-06-01',
           'anthropic-dangerous-direct-browser-access': 'true',
         },

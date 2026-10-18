@@ -457,6 +457,7 @@
   "reasoning.low": "低",
   "reasoning.medium": "中",
   "reasoning.high": "高",
+  "reasoning.max": "最大",
   "agent.reasoning": "推理强度",
   "models.reasons": "会推理",
   "models.noReasoning": "不推理",

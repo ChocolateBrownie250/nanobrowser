@@ -14,6 +14,8 @@ const NOTHING: Wire = [undefined, undefined, undefined, undefined];
 const UNKNOWN: Wire = [undefined, 'low', 'medium', 'high'];
 const PRO: Wire = ['medium', 'medium', 'medium', 'high'];
 const HIGH_FOR_MEDIUM: Wire = ['low', 'low', 'high', 'high'];
+/** GLM-5.3: Low, Medium and High send low, high and max, shown as Low, High, Max. */
+const GLM: Wire = ['low', 'low', 'high', 'max'];
 
 /** The OpenAI-compatible card at a public host unless a case says otherwise. */
 const CLOUD_URL = 'https://api.example.com/v1';
@@ -146,8 +148,8 @@ const MATRIX: Array<[ProviderKind, string, string | null, ReasoningSupport | und
   ['openrouter', 'moonshotai/kimi-k3', 'kimi-k3-openrouter', 'optional', ['none', 'low', 'high', 'high']],
   ['openai-compatible', 'kimi-k3', 'kimi-k3', 'always', HIGH_FOR_MEDIUM],
   ['openai-compatible', 'kimi-k4', 'kimi-family', 'always', ALWAYS],
-  ['openrouter', 'z-ai/glm-5.3', 'glm-5-3', 'always', HIGH_FOR_MEDIUM],
-  ['openai-compatible', 'glm-5.3-flash', 'glm-5-3-flash', 'always', HIGH_FOR_MEDIUM],
+  ['openrouter', 'z-ai/glm-5.3', 'glm-5-3', 'always', GLM],
+  ['openai-compatible', 'glm-5.3-flash', 'glm-5-3-flash', 'always', GLM],
   ['openrouter', 'z-ai/glm-5', 'glm-family', 'always', ALWAYS],
   ['openai-compatible', 'glm-6', 'glm-family', 'always', ALWAYS],
   // Qwen on the cloud
@@ -189,6 +191,14 @@ describe('the catalogue', () => {
     const profile = resolveProfile({ kind, modelName: name, baseUrl });
     expect(profile.reasoning).toBe(capability);
     expect(REASONING_EFFORTS.map(e => wireEffort(profile, e))).toEqual(wire);
+  });
+
+  it("shows GLM-5.3's levels as Low, High and Max", () => {
+    for (const modelName of ['glm-5.3', 'glm-5.3-flash']) {
+      const profile = resolveProfile({ kind: 'anthropic', modelName, baseUrl: 'https://api.z.ai/api/anthropic/v1' });
+      expect(profile.labels).toEqual({ medium: 'high', high: 'max' });
+    }
+    expect(resolveProfile({ kind: 'anthropic', modelName: 'claude-sonnet-4-5' }).labels).toBeUndefined();
   });
 
   it('names every row at least once', () => {

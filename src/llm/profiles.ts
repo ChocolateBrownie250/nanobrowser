@@ -3,7 +3,7 @@
 // row (src/llm/catalogue.ts), then the endpoint's defaults.
 // Detection from a local server then lowers the window.
 import { defaults, findRow, isCloudEndpoint, sendRule } from './catalogue';
-import type { ReasoningEffort, ReasoningSupport, WireEffort } from './catalogue';
+import type { EffortLabel, ReasoningEffort, ReasoningSupport, WireEffort } from './catalogue';
 import type { ProviderKind } from './providers';
 
 export interface ModelProfile {
@@ -14,6 +14,8 @@ export interface ModelProfile {
   reasoning?: ReasoningSupport;
   /** The row's map of efforts to wire values. */
   wire?: Partial<Record<ReasoningEffort, WireEffort>>;
+  /** The row's names for the efforts in the picker. */
+  labels?: Partial<Record<ReasoningEffort, EffortLabel>>;
   /**
    * Tokens the provider counts for each token estimated at 4 characters. Measured in evaluation runs: Anthropic counts
    * about 1.3; Gemini, OpenAI and Ollama 1.06 or less. Unset means 1.
@@ -97,6 +99,7 @@ export function resolveProfile(input: ProfileInput): ModelProfile {
   const reasoning = capabilityFrom(reasons, acceptsNone);
   if (reasoning) profile.reasoning = reasoning;
   if (row?.wire) profile.wire = row.wire;
+  if (row?.labels) profile.labels = row.labels;
   // Detection only ever lowers the window.
   if (input.detectedContext && input.detectedContext > 0) {
     profile.contextWindow = Math.min(profile.contextWindow, input.detectedContext);

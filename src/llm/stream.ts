@@ -204,6 +204,8 @@ async function streamTurnNow(request: TurnRequest): Promise<TurnResult> {
     let finish: TurnFinish = 'other';
     let usage: TokenUsage | null = null;
     let failure: unknown;
+    // A server that takes the effort as a provider option gets it there, and the SDK's `reasoning` is left out.
+    const effortOptions = reasoning ? request.chat.reasoningOptions?.(reasoning) : undefined;
     try {
       const result = streamText({
         model: request.chat.model,
@@ -212,11 +214,11 @@ async function streamTurnNow(request: TurnRequest): Promise<TurnResult> {
         tools,
         toolChoice: tools ? (request.toolChoice ?? 'auto') : undefined,
         maxOutputTokens: request.maxOutputTokens ?? request.chat.spec.maxOutputTokens,
-        ...(reasoning ? { reasoning } : {}),
+        ...(reasoning && !effortOptions ? { reasoning } : {}),
         maxRetries: 0,
         abortSignal: request.signal,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        providerOptions: request.chat.providerOptions as any,
+        providerOptions: (effortOptions ?? request.chat.providerOptions) as any,
         onError: () => undefined,
       });
       for await (const part of result.fullStream) {

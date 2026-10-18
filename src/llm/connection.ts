@@ -1,6 +1,14 @@
 // Test models and model lists for the Models page. Called from the options page directly: the page needs no
 // worker command.
-import { CHAT_COMPLETIONS_KINDS, createModel, DEFAULT_BASE_URLS, openAICompatibleBaseUrl } from './providers';
+import {
+  anthropicKeyHeaders,
+  CHAT_COMPLETIONS_KINDS,
+  createModel,
+  DEFAULT_BASE_URLS,
+  isZai,
+  openAICompatibleBaseUrl,
+  ZAI_MODELS,
+} from './providers';
 import type { CreateModelOptions, ModelSpec } from './providers';
 import { isOriginRefused } from './errors';
 import { refusesImages, refusesReasoning, streamTurn } from './stream';
@@ -186,11 +194,13 @@ export async function listModels(
   switch (spec.kind) {
     case 'anthropic': {
       const body = await get(`${spec.baseUrl || 'https://api.anthropic.com/v1'}/models?limit=100`, {
-        'x-api-key': spec.apiKey ?? '',
+        ...anthropicKeyHeaders(spec.apiKey, spec.baseUrl),
         'anthropic-version': '2023-06-01',
         'anthropic-dangerous-direct-browser-access': 'true',
       });
       entries = ((body.data as ListEntry[]) ?? []).map(m => [String(m.id), m]);
+      // Z.ai may answer the list with a status body instead of models: its Coding Plan models stand in.
+      if (!entries.length && isZai(spec.baseUrl)) entries = ZAI_MODELS.map(name => [name, {}]);
       break;
     }
     case 'gemini': {
