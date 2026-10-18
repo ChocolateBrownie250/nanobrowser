@@ -69,8 +69,9 @@ export function anthropicKeyHeaders(apiKey: string | undefined, baseUrl?: string
 
 /**
  * Z.ai's GLM effort, sent as `output_config.effort`. Its endpoint varies GLM's thinking only by that field and ignores
- * `thinking.budget_tokens`, which the SDK would otherwise send for a model it does not know. The SDK's effort has no
- * `minimal`; None keeps the SDK's disabled thinking.
+ * `thinking.budget_tokens`, which the SDK would otherwise send for a model it does not know. GLM's levels are low, high
+ * and max (the catalogue maps the picker to them). The SDK's effort has no `minimal`; None keeps the SDK's disabled
+ * thinking.
  */
 function zaiReasoningOptions(reasoning: WireEffort): ProviderOptions | undefined {
   if (reasoning === 'none') return undefined;

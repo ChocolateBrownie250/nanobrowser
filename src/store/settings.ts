@@ -3,7 +3,7 @@
 import type { ProviderKind } from '../llm/providers';
 import { resolveProfile } from '../llm/profiles';
 import type { LearntFacts } from '../llm/profiles';
-import type { ReasoningEffort, ReasoningSupport } from '../llm/catalogue';
+import type { EffortLabel, ReasoningEffort, ReasoningSupport } from '../llm/catalogue';
 import { createStorage } from './storage';
 import type { LivePair, ModelRef, PermissionMode } from './types';
 
@@ -207,10 +207,8 @@ export function usableModel(
 }
 
 /** Whether a configured model reasons: what Test models learnt, else the catalogue. */
-export function capabilityOf(
-  providers: ProviderConfig[],
-  ref: ModelRef | null | undefined,
-): ReasoningSupport | undefined {
+/** The model's profile from its provider entry and what was learnt about it, or undefined when it is not configured. */
+function profileOf(providers: ProviderConfig[], ref: ModelRef | null | undefined) {
   const found = findModel(providers, ref);
   if (!found) return undefined;
   return resolveProfile({
@@ -218,7 +216,22 @@ export function capabilityOf(
     modelName: found.model.name,
     baseUrl: found.provider.baseUrl,
     ...learnt(found.model),
-  }).reasoning;
+  });
+}
+
+export function capabilityOf(
+  providers: ProviderConfig[],
+  ref: ModelRef | null | undefined,
+): ReasoningSupport | undefined {
+  return profileOf(providers, ref)?.reasoning;
+}
+
+/** The picker's names for the model's efforts, where its vendor names them differently (GLM's Low, High, Max). */
+export function effortLabelsOf(
+  providers: ProviderConfig[],
+  ref: ModelRef | null | undefined,
+): Partial<Record<ReasoningEffort, EffortLabel>> | undefined {
+  return profileOf(providers, ref)?.labels;
 }
 
 /** A site's rule: one map, keyed with `siteOf`, one rule per site. */

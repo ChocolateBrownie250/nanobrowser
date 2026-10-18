@@ -74,7 +74,7 @@ describe('providers', () => {
     for (const [sent, effort] of [
       ['low', 'low'],
       ['high', 'high'],
-      ['xhigh', 'xhigh'],
+      ['max', 'max'],
       ['minimal', 'low'],
     ] as const) {
       const r = await capture(zai as ModelSpec, sent);

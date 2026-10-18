@@ -8,6 +8,7 @@ import type { ConnectionResult, ModelList, ProviderKind } from '@src/llm';
 import type { ReasoningEffort } from '@src/llm/catalogue';
 import {
   capabilityOf,
+  effortLabelsOf,
   DEFAULT_SETTINGS,
   keysStorage,
   LOCAL_KINDS,
@@ -21,7 +22,7 @@ import { Button, Input, Notice, Select } from '@src/ui/components';
 import { SettingsCard } from './SettingsCard';
 import { VoiceCard } from './VoiceCard';
 import { listProblem, saveTest, testModel, wholeTestOnAdd } from './model-test';
-import { effortRow } from '@src/side-panel/ModelMenu';
+import { effortRow, effortText } from '@src/side-panel/ModelMenu';
 import { useStorage } from '@src/ui/hooks';
 import { CheckIcon, ChevronIcon, CloseIcon, EyeIcon, EyeOffIcon, PlusIcon, TrashIcon } from '@src/ui/icons';
 import { t } from '@src/ui/i18n';
@@ -142,7 +143,7 @@ export function ProvidersSection() {
               onChange={e => void settingsStorage.set(s => ({ ...s, reasoning: e.target.value as ReasoningEffort }))}>
               {effort.pills.map(value => (
                 <option key={value} value={value}>
-                  {t(`reasoning.${value}`)}
+                  {effortText(value, effortLabelsOf(providers, settings.defaultModel))}
                 </option>
               ))}
             </Select>
