@@ -2,12 +2,12 @@
 //   NB_LIVE=1 corepack pnpm vitest run src/llm/__tests__/live.test.ts
 // Keys come from the environment and are never written anywhere. Models can be overridden with NB_LIVE_<KIND>.
 import { describe, expect, it } from 'vitest';
-import { createModel } from '../providers';
+import { createModel, ZAI_ANTHROPIC_BASE_URL } from '../providers';
 import type { ProviderKind } from '../providers';
 import { streamTurn } from '../stream';
 
 const live = process.env.NB_LIVE === '1';
-const cases: Array<{ kind: ProviderKind; model: string; key?: string }> = [
+const cases: Array<{ kind: ProviderKind; model: string; key?: string; baseUrl?: string }> = [
   {
     kind: 'anthropic',
     model: process.env.NB_LIVE_ANTHROPIC ?? 'claude-haiku-4-5-20251001',
@@ -18,6 +18,13 @@ const cases: Array<{ kind: ProviderKind; model: string; key?: string }> = [
     kind: 'gemini',
     model: process.env.NB_LIVE_GEMINI ?? 'gemini-2.5-flash',
     key: process.env.GEMINI_API_KEY ?? process.env.GOOGLE_GENERATIVE_AI_API_KEY,
+  },
+  {
+    // Z.ai's GLM Coding Plan through its Anthropic-compatible endpoint.
+    kind: 'anthropic',
+    model: process.env.NB_LIVE_ZAI ?? 'glm-5.3',
+    key: process.env.ZAI_API_KEY,
+    baseUrl: ZAI_ANTHROPIC_BASE_URL,
   },
   {
     kind: 'openrouter',
@@ -41,11 +48,11 @@ const tools = {
 describe.skipIf(!live)('live providers', () => {
   it.each(cases)(
     '$kind $model streams a tool call',
-    async ({ kind, model, key }) => {
+    async ({ kind, model, key, baseUrl }) => {
       expect(key, `no key for ${kind}`).toBeTruthy();
       let deltas = 0;
       const result = await streamTurn({
-        chat: createModel({ kind, modelName: model, apiKey: key, maxOutputTokens: 512 }),
+        chat: createModel({ kind, modelName: model, apiKey: key, baseUrl, maxOutputTokens: 512 }),
         system: 'You operate a web page through tools. Always act with a tool call.',
         messages: [{ role: 'user', content: 'Click the element with ref e7.' }],
         tools,
