@@ -267,7 +267,7 @@
   "perm.block": "封鎖",
   "perm.allowHint": "變更不詢問，直接執行。",
   "perm.askHint": "變更一律先詢問，自動模式下也一樣。",
-  "perm.blockHint": "代理程式不會開啟或操作該網站。",
+  "perm.blockHint": "代理程式不會在分頁中開啟或操作該網站及其子網域的頁面。嵌入其他網站的該網站框架不在此限。",
   "perm.removeSite": "移除 {site}",
   "perm.addSite": "新增網站",
   "perm.add": "新增",

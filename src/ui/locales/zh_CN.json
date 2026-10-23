@@ -267,7 +267,7 @@
   "perm.block": "屏蔽",
   "perm.allowHint": "更改不询问，直接执行。",
   "perm.askHint": "更改总是先询问，自动模式下也一样。",
-  "perm.blockHint": "智能体不会打开或操作该网站。",
+  "perm.blockHint": "智能体不会在标签页中打开或操作该网站及其子域名的页面。嵌入其他网站的该网站框架不在此限。",
   "perm.removeSite": "移除 {site}",
   "perm.addSite": "添加网站",
   "perm.add": "添加",

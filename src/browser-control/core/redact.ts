@@ -1,12 +1,23 @@
 // Redaction of agent-supplied values before they reach audit listeners (the side panel, any log). The audit entry is
 // written before the target is resolved, and for rejected calls it never is, so whether a field is a password cannot
 // be known there: every value an agent types or sets is replaced, whatever the field. Booleans stay (a checkbox state
-// is not a secret); so do targets, keys and expectations other than a value. A prompt() answer is redacted too.
+// is not a secret); so do targets, key chords and expectations other than a value. A prompt() answer is redacted too,
+// and so are the bytes and local paths of an upload and a long run of keys.
 
 /** What replaces a redacted string: its length only. */
 export function redacted(value: string): string {
   return `‹redacted, ${value.length} character${value.length === 1 ? '' : 's'}›`;
 }
+
+/** What replaces the bytes of an uploaded file: their count only. */
+function redactedBytes(base64: string): string {
+  const padding = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0;
+  const bytes = Math.max(0, Math.floor((base64.length * 3) / 4) - padding);
+  return `‹${bytes} byte${bytes === 1 ? '' : 's'}›`;
+}
+
+/** A key or chord ("Control+Shift+ArrowLeft") is at most this long; anything longer is text typed key by key. */
+const MAX_CHORD_LENGTH = 40;
 
 function redactValue(value: unknown): unknown {
   if (typeof value === 'string') return redacted(value);
@@ -28,6 +39,21 @@ export function redactArgs(tool: string, args: unknown): unknown {
   if (tool === 'type' && 'text' in out) out.text = redactValue(out.text);
   // The answer to a prompt() can be a one-time code or a password as well.
   if (tool === 'handle_dialog' && 'promptText' in out) out.promptText = redactValue(out.promptText);
+  // A long "key" is text typed one press at a time, as a password could be; a chord stays readable in the log.
+  if (tool === 'press' && typeof out.keys === 'string' && out.keys.length > MAX_CHORD_LENGTH) {
+    out.keys = redactValue(out.keys);
+  }
+  // The bytes of an uploaded file are the user's file, not a log line; local paths are not logged either.
+  if (tool === 'upload') {
+    if (Array.isArray(out.attachments)) {
+      out.attachments = out.attachments.map(a =>
+        a && typeof a === 'object' && typeof (a as { base64?: unknown }).base64 === 'string'
+          ? { ...a, base64: redactedBytes((a as { base64: string }).base64) }
+          : a,
+      );
+    }
+    if (Array.isArray(out.paths)) out.paths = `‹${out.paths.length} path${out.paths.length === 1 ? '' : 's'}›`;
+  }
   if (tool === 'fill_form' && Array.isArray(out.fields)) {
     out.fields = out.fields.map(f =>
       f && typeof f === 'object' && 'value' in f ? { ...f, value: redactValue((f as { value: unknown }).value) } : f,

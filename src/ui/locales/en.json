@@ -267,7 +267,7 @@
   "perm.block": "Block",
   "perm.allowHint": "Changes run without asking.",
   "perm.askHint": "Changes always ask first, even in Auto mode.",
-  "perm.blockHint": "The agent never opens or acts on the site.",
+  "perm.blockHint": "The agent never opens or acts on the pages of the site or its subdomains in a tab. Frames from the site embedded in other sites are not covered.",
   "perm.removeSite": "Remove {site}",
   "perm.addSite": "Add a site",
   "perm.add": "Add",

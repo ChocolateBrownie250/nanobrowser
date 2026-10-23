@@ -23,7 +23,12 @@ export type { UrlPolicy } from './core/url-policy';
 export { captureTier1 } from './core/perception/capture';
 export type { Capture, FrameCapture } from './core/perception/capture';
 export { sendRaw, CdpCommandError, CdpTimeoutError, PAGE_SESSION_ALIAS } from './host/cdp-session';
-export { chromeAttacher, ChromeTabConnection, isRestrictedUrl } from './host/connection';
+export {
+  chromeAttacher,
+  ChromeTabConnection,
+  isRestrictedUrl,
+  releaseLeftoverDebuggerSessions,
+} from './host/connection';
 export { chromeTabHost, chromeEpochStore } from './host/chrome-host';
 export { PuppeteerFrameTopology, listFrames, readFrameTree, checkFrameAccessors } from './host/frame-topology';
 export type { FrameInfo, AccessorCheck } from './host/frame-topology';
