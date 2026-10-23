@@ -7,28 +7,26 @@ import { connectTab, disconnectTab } from './puppeteer';
 import type { PuppeteerConnection } from './puppeteer';
 import { PuppeteerFrameTopology } from './frame-topology';
 import { PuppeteerPagePort } from './page-port';
+import { isRestrictedPageUrl } from '../core/url-policy';
+
+/** Chrome's refusal when a debugger is on the tab already: "Another debugger is already attached to the tab ...". */
+const ALREADY_ATTACHED = /already attached/i;
 
 type EventHandler = (params: unknown, sessionId: SessionId) => void;
 
-/** Pages the debugger cannot attach to (restricted pages). */
+/** Pages the debugger cannot attach to (restricted pages): the same schemes layer 1 refuses, see `isRestrictedPageUrl`. */
 export function isRestrictedUrl(url: string): boolean {
-  const u = url.trim().toLowerCase();
-  return (
-    u.startsWith('chrome://') ||
-    u.startsWith('chrome-extension://') ||
-    u.startsWith('chrome-search://') ||
-    u.startsWith('chrome-untrusted://') ||
-    u.startsWith('devtools://') ||
-    u.startsWith('edge://') ||
-    u.startsWith('view-source:') ||
-    u.startsWith('https://chromewebstore.google.com') ||
-    u.startsWith('https://chrome.google.com/webstore')
-  );
+  return isRestrictedPageUrl(url);
 }
 
 const connections = new Map<number, ChromeTabConnection>();
+/** Connections being made, one per tab: a second open of a tab shares the first instead of detaching it. */
+const opening = new Map<number, Promise<ChromeTabConnection>>();
+/** A detach that came while a tab's connection was still being made; applied when the connection is registered. */
+const detachedWhileOpening = new Map<number, DetachInfo>();
 let listening = false;
 
+/** Registers the debugger's event listeners, once. Called at worker start so no event is missed. */
 function listen() {
   if (listening) return;
   listening = true;
@@ -38,8 +36,37 @@ function listen() {
   });
   chrome.debugger.onDetach.addListener((source, reason) => {
     if (source.tabId === undefined) return;
-    connections.get(source.tabId)?.markDetached({ reason });
+    const connection = connections.get(source.tabId);
+    if (connection) connection.markDetached({ reason });
+    else if (opening.has(source.tabId)) detachedWhileOpening.set(source.tabId, { reason });
   });
+}
+
+let swept: Promise<void> | undefined;
+
+/**
+ * Detaches the debugger from every tab it is still on when the worker starts. A restarted worker has no connection
+ * object for them, and a session left behind can keep Fetch interception on, which freezes the tab's page loads.
+ * Chrome only lets an extension detach its own sessions, so DevTools and other extensions are not affected: their
+ * detach fails and is ignored. Runs once; every attach waits for it. Does nothing without chrome.debugger.
+ */
+export function releaseLeftoverDebuggerSessions(): Promise<void> {
+  if (swept) return swept;
+  if (typeof chrome === 'undefined' || !chrome.debugger?.getTargets) return (swept = Promise.resolve());
+  listen();
+  swept = (async () => {
+    try {
+      const targets = await chrome.debugger.getTargets();
+      await Promise.all(
+        targets
+          .filter(t => t.attached && t.tabId !== undefined && !connections.has(t.tabId))
+          .map(t => chrome.debugger.detach({ tabId: t.tabId }).catch(() => undefined)),
+      );
+    } catch {
+      // Nothing to release, or the browser would not say.
+    }
+  })();
+  return swept;
 }
 
 class ChromeCdpPort implements CdpPort {
@@ -82,10 +109,25 @@ export class ChromeTabConnection implements TabAttachment {
     this.page = new PuppeteerPagePort(puppeteer.page, this.cdp);
   }
 
-  static async open(tabId: number): Promise<ChromeTabConnection> {
+  /** The tab's connection: the live one, or the one being made (one attach per tab at a time). */
+  static open(tabId: number): Promise<ChromeTabConnection> {
     listen();
     const existing = connections.get(tabId);
-    if (existing && !existing.detached) return existing;
+    if (existing && !existing.detached) return Promise.resolve(existing);
+    let pending = opening.get(tabId);
+    if (!pending) {
+      pending = ChromeTabConnection.#connect(tabId).finally(() => {
+        opening.delete(tabId);
+        detachedWhileOpening.delete(tabId);
+      });
+      opening.set(tabId, pending);
+    }
+    return pending;
+  }
+
+  static async #connect(tabId: number): Promise<ChromeTabConnection> {
+    // Sessions a restarted worker left behind go first, so they cannot be mistaken for another debugger.
+    await releaseLeftoverDebuggerSessions();
     const tab = await chrome.tabs.get(tabId).catch(() => null);
     if (!tab) throw new LayerError('TAB_NOT_IN_SESSION', `Tab ${tabId} does not exist`);
     if (isRestrictedUrl(tab.url ?? tab.pendingUrl ?? '')) {
@@ -97,12 +139,18 @@ export class ChromeTabConnection implements TabAttachment {
         // This extension's debugger is still on the tab though no connection here knows it: the service worker
         // restarted while the tab was attached. Detach it and attach again. Another client's debugger cannot be
         // detached from here, and the second attempt then fails with the same error.
-        if (!/already attached/i.test(error instanceof Error ? error.message : String(error))) throw error;
+        if (!ALREADY_ATTACHED.test(error instanceof Error ? error.message : String(error))) throw error;
         await chrome.debugger.detach({ tabId }).catch(() => undefined);
         return connectTab(tabId);
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      if (ALREADY_ATTACHED.test(message)) {
+        throw new LayerError(
+          'PAGE_NOT_SUPPORTED',
+          `Another debugger (DevTools, or another extension) is attached to tab ${tabId}, so it cannot be controlled. Close it and try again.`,
+        );
+      }
       if (/cannot access|cannot attach|chrome:\/\/|extensions gallery/i.test(message)) {
         throw new LayerError('PAGE_NOT_SUPPORTED', `Cannot attach to tab ${tabId}: ${message}`);
       }
@@ -110,6 +158,13 @@ export class ChromeTabConnection implements TabAttachment {
     }
     const connection = new ChromeTabConnection(tabId, puppeteer);
     connections.set(tabId, connection);
+    // A detach that came while the connection was being made is applied now, so no one is handed a dead connection
+    // that looks live.
+    const early = detachedWhileOpening.get(tabId);
+    if (early) {
+      connection.markDetached(early);
+      return connection;
+    }
     // The operated tab may sit in a window the user is not in; keep the page behaving as focused.
     await connection.cdp
       .send(undefined, 'Emulation.setFocusEmulationEnabled', { enabled: true })
@@ -134,7 +189,12 @@ export class ChromeTabConnection implements TabAttachment {
         }),
       );
     }
-    return sendRaw<T>(this.tabId, sessionId, method, params, timeoutMs, this.#detachedSignal);
+    return sendRaw<T>(this.tabId, sessionId, method, params, timeoutMs, this.#detachedSignal).catch(error => {
+      // Chrome says the tab is gone before (or without) an onDetach event: the connection is dead from now on.
+      if (error instanceof LayerError && error.code === 'DEBUGGER_DETACHED')
+        this.markDetached({ reason: 'command_failed' });
+      throw error;
+    });
   }
 
   subscribe(method: string, handler: EventHandler, sessionId: SessionId, scoped: boolean): () => void {
@@ -161,7 +221,7 @@ export class ChromeTabConnection implements TabAttachment {
   markDetached(info: DetachInfo): void {
     if (this.#detached) return;
     this.#detached = info;
-    connections.delete(this.tabId);
+    if (connections.get(this.tabId) === this) connections.delete(this.tabId);
     this.#rejectDetached(
       new LayerError('DEBUGGER_DETACHED', `The debugger detached from tab ${this.tabId} (${info.reason})`, {
         delivered: 'unknown',
@@ -191,7 +251,7 @@ export class ChromeTabConnection implements TabAttachment {
 
   async close(): Promise<void> {
     if (this.#detached) return;
-    connections.delete(this.tabId);
+    if (connections.get(this.tabId) === this) connections.delete(this.tabId);
     try {
       await this.#disconnect();
     } finally {

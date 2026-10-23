@@ -317,7 +317,7 @@ defineScenario({
     const r = await ctx.call('press', { keys: 'Enter', target: { ref: refOf(snap, /clickable "New Wireless/) } });
     const c = await counts(tabId);
     return outcome(
-      'INTERCEPTED, delivered false; the card was not activated',
+      'INTERCEPTED, delivered false (the key guard found focus elsewhere before any key was sent); the card was not activated',
       `${err(r)} ${r.error?.message ?? ''}; card ${c.card ?? 0}`,
       r.error?.code === 'INTERCEPTED' && r.error.delivered === false && !c.card,
     );

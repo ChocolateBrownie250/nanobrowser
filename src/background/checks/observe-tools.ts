@@ -30,7 +30,8 @@ defineCheck({
       assert(snap.ok, `snapshot failed: ${snap.text}`);
       const data = snap.data as SnapshotData;
       assert(data.refs >= 30, `expected at least 30 refs, got ${data.refs}`);
-      assert(/<<<page-content [0-9a-f]{12}>>>/.test(snap.text), 'page text sits inside the boundary');
+      // The opening marker names the page's site after the nonce (`<<<page-content 3f9a2c1b7e04 site=localhost:8787>>>`).
+      assert(/<<<page-content [0-9a-f]{12}(?: site=[^\s>]+)?>>>/.test(snap.text), 'page text sits inside the boundary');
       for (const s of SECRETS) assert(!JSON.stringify(snap).includes(s), `secret "${s}" leaked into the snapshot`);
       out.snapshot = {
         refs: data.refs,
@@ -73,8 +74,8 @@ defineCheck({
       const errors: Record<string, string | undefined> = {};
       errors.unknownRef = (await session.call('read', { ref: 'zz999' })).error?.code;
       errors.badArgs = (await session.call('snapshot', { mode: 'everything' })).error?.code;
-      errors.unavailable = (await session.call('fill_form', { fields: [{ target: { ref: 'e1' }, value: 'x' }] })).error
-        ?.code;
+      // A tool the catalogue does not have (fill_form is available, and refs carry the epoch's prefix, so "e1" is unknown).
+      errors.unavailable = (await session.call('no_such_tool', {})).error?.code;
       errors.capability = (await session.call('ask_user', { message: 'hi', kind: 'takeover' })).error?.code;
       errors.notInSession = (await session.call('snapshot', { tabId: 999999 })).error?.code;
       assert(errors.unknownRef === 'REF_UNKNOWN', `unknown ref: ${errors.unknownRef}`);

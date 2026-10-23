@@ -48,19 +48,38 @@ export interface SavedFile {
   error?: string;
 }
 
-/** Waits for a download to complete or be interrupted. */
-function follow(downloadId: number): Promise<{ state: 'complete' | 'interrupted'; error?: string }> {
+/** How long a download may take to end: a Save as dialog waits for a person, so it gets longer. */
+const DOWNLOAD_CLOCK_MS = 2 * 60_000;
+const SAVE_AS_CLOCK_MS = 10 * 60_000;
+
+type Ended = { state: 'complete' | 'interrupted'; error?: string };
+
+/**
+ * Waits for a download to complete or be interrupted. It also ends when `signal` aborts (Stop) or the clock runs out;
+ * the download is then cancelled and the wait reports it as interrupted. The listener is always removed.
+ */
+function follow(downloadId: number, signal?: AbortSignal, clockMs = DOWNLOAD_CLOCK_MS): Promise<Ended> {
   return new Promise(resolve => {
-    const done = (state: 'complete' | 'interrupted', error?: string) => {
+    const done = (state: Ended['state'], error?: string) => {
       chrome.downloads.onChanged.removeListener(listener);
+      signal?.removeEventListener('abort', onAbort);
+      clearTimeout(clock);
       resolve({ state, ...(error ? { error } : {}) });
     };
+    const stop = (error: string) => {
+      void Promise.resolve(chrome.downloads.cancel(downloadId)).catch(() => undefined);
+      done('interrupted', error);
+    };
+    const onAbort = () => stop('USER_CANCELED');
     const listener = (delta: chrome.downloads.DownloadDelta) => {
       if (delta.id !== downloadId || !delta.state?.current) return;
       if (delta.state.current === 'complete') done('complete');
       else if (delta.state.current === 'interrupted') done('interrupted', delta.error?.current);
     };
     chrome.downloads.onChanged.addListener(listener);
+    signal?.addEventListener('abort', onAbort, { once: true });
+    const clock = setTimeout(() => stop('TIMED_OUT'), clockMs);
+    if (signal?.aborted) return onAbort();
     // It may have ended before the listener was added.
     void chrome.downloads.search({ id: downloadId }).then(([item]) => {
       if (item?.state === 'complete') done('complete');
@@ -100,23 +119,36 @@ export function isNumberedCopy(saved: string, asked: string): boolean {
 
 /**
  * Saves text as a file in the Downloads folder. Never overwrites: Chrome adds a number to the name. With `saveAs`,
- * Chrome's own dialog lets the user choose where.
+ * Chrome's own dialog lets the user choose where. Stop (`signal`) and a clock end the wait and cancel the download.
  */
 export async function saveText(
   file: { filename: string; content: string; mimeType: string },
   saveAs = false,
+  signal?: AbortSignal,
 ): Promise<SavedFile> {
   const url = await blobUrl(file.content, file.mimeType);
   naming.set(url, file.filename);
   chrome.downloads.onDeterminingFilename.addListener(suggestName);
+  const cancelled: SavedFile = { downloadId: -1, name: file.filename, state: 'interrupted', error: 'USER_CANCELED' };
   try {
-    const downloadId = await chrome.downloads.download({
+    if (signal?.aborted) return cancelled;
+    const starting = chrome.downloads.download({
       url,
       filename: file.filename,
       conflictAction: 'uniquify',
       saveAs,
     });
-    const end = await follow(downloadId);
+    // The call itself can wait for the Save as dialog, so Stop must be able to end it too.
+    const started = await Promise.race([
+      starting,
+      new Promise<null>(resolve => signal?.addEventListener('abort', () => resolve(null), { once: true })),
+    ]);
+    if (started === null) {
+      void starting.then(id => chrome.downloads.cancel(id)).catch(() => undefined);
+      return cancelled;
+    }
+    const downloadId = started;
+    const end = await follow(downloadId, signal, saveAs ? SAVE_AS_CLOCK_MS : DOWNLOAD_CLOCK_MS);
     const [item] = await chrome.downloads.search({ id: downloadId });
     const name = item?.filename ? item.filename.split(/[/\\]/).pop()! : file.filename;
     return { downloadId, name, ...end };

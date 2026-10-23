@@ -4,8 +4,13 @@ import type { CdpPort, PagePort, ScreenshotOptions } from '../core/ports';
 import { LayerError } from '../protocol/errors';
 import { splitChord } from '../core/interaction/keys';
 import { quote } from '../core/text';
-import { isKnownKey } from './puppeteer';
+import { isKnownKey, within } from './puppeteer';
 import type { KeyInput, Page } from './puppeteer';
+
+/** A key event or a typed character is one CDP command; one that does not answer in this time is given up. */
+const KEY_COMMAND_TIMEOUT_MS = 10_000;
+
+const noop = (): void => undefined;
 
 const MODIFIERS = new Set(['Alt', 'Control', 'Meta', 'Shift', 'ControlOrMeta']);
 
@@ -63,11 +68,11 @@ export class PuppeteerPagePort implements PagePort {
   }
 
   async keyDown(key: string): Promise<void> {
-    await this.page.keyboard.down(key as KeyInput);
+    await within(this.page.keyboard.down(key as KeyInput), KEY_COMMAND_TIMEOUT_MS, `Key down ${quote(key, 20)}`, noop);
   }
 
   async keyUp(key: string): Promise<void> {
-    await this.page.keyboard.up(key as KeyInput);
+    await within(this.page.keyboard.up(key as KeyInput), KEY_COMMAND_TIMEOUT_MS, `Key up ${quote(key, 20)}`, noop);
   }
 
   isKey(char: string): boolean {
@@ -75,7 +80,7 @@ export class PuppeteerPagePort implements PagePort {
   }
 
   async insertCharacter(char: string): Promise<void> {
-    await this.page.keyboard.sendCharacter(char);
+    await within(this.page.keyboard.sendCharacter(char), KEY_COMMAND_TIMEOUT_MS, 'Typing a character', noop);
   }
 
   async goto(url: string, timeoutMs: number): Promise<void> {

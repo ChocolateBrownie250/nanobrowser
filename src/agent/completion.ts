@@ -3,6 +3,7 @@
 // did, and only evidence about the tab afterwards clears it.
 import type { Result } from '@src/browser-control';
 import type { DebtItem } from '@src/store/types';
+import { defuseQuotes } from './safe-text';
 import { PAGE_ACTIONS } from './tools';
 
 export interface DebtEntry extends DebtItem {
@@ -31,7 +32,7 @@ export function createsDebt(tool: string, result: Result | undefined): boolean {
 /** A label for the refusal and the final answer: "click button «Submit» on tab 12". */
 export function debtLabel(tool: string, result: Result | undefined, tabId: number): string {
   const target = result?.receipt?.target ?? (result?.error ? result.error.code : '');
-  return `${tool}${target ? ` ${target}` : ''} on tab ${tabId}`;
+  return `${tool}${target ? ` ${defuseQuotes(target)}` : ''} on tab ${tabId}`;
 }
 
 /** Whether a later result on the tab is evidence of its state after the action. */

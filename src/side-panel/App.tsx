@@ -22,8 +22,9 @@ import type { LauncherItem, ModelChoice, PendingFile } from './Composer';
 import { attachmentKind, MAX_FILE } from '@src/store/attachments';
 import { voiceLanguage, voiceSetup } from '@src/ui/voice';
 import { transcribeAudio } from '@src/llm/transcribe';
-import { newId, putBlob } from '@src/store/conversations';
+import { deleteBlob, newId, putBlob } from '@src/store/conversations';
 import { INITIAL, isActive, reduce } from './state';
+import { escapeStopsRun } from './keys';
 import { Transcript } from './Transcript';
 import { HistoryDrawer } from './History';
 import { Cards, containsCardNumber } from './Cards';
@@ -122,6 +123,13 @@ export function App() {
     taken.current = state.attached.length;
     if (fresh.length) setFiles(current => [...current, ...fresh]);
   }, [state.attached]);
+  /** Takes a file out of the composer: its preview is released and its stored copy deleted, as it was never sent. */
+  const removeFile = (id: string) => {
+    const file = files.find(f => f.ref.id === id);
+    if (file?.preview) URL.revokeObjectURL(file.preview);
+    setFiles(current => current.filter(f => f.ref.id !== id));
+    void deleteBlob(id).catch(() => undefined);
+  };
   const clearFiles = () => {
     for (const f of files) if (f.preview) URL.revokeObjectURL(f.preview);
     setFiles([]);
@@ -266,8 +274,8 @@ export function App() {
         keys.current.changeMode(keys.current.mode === 'ask' ? 'auto' : 'ask');
         return;
       }
-      if (e.key !== 'Escape' || e.defaultPrevented) return;
-      if (document.querySelector('[role="dialog"]') || document.activeElement?.closest('[role="menu"]')) return;
+      // Not while an input method composes (Esc closes its candidate list), nor when a dialog or menu has the key.
+      if (!escapeStopsRun(e, document)) return;
       if (isActive(state.status) && state.conversationId && client) {
         client.send({ type: 'stop', conversationId: state.conversationId });
       }
@@ -581,7 +589,7 @@ export function App() {
         onScreenshot={() =>
           client?.send({ type: 'screenshot-tab', tabId: client.tabId, conversationId: state.conversationId })
         }
-        onRemoveFile={id => setFiles(current => current.filter(f => f.ref.id !== id))}
+        onRemoveFile={removeFile}
         sharedTabs={[client?.tabId ?? -1, ...state.tabs.map(x => x.tabId), ...pendingTabs.map(p => p.tabId)]}
         onShareTab={tab => {
           if (state.conversationId)

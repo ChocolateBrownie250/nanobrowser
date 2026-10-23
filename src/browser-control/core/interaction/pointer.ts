@@ -12,7 +12,7 @@ import type { ResolvedTarget } from './resolve';
 import { afterInput, assertJudged } from './gate';
 import type { GateResult } from './gate';
 import { preflightNavigation } from './preflight';
-import { sendWithheld } from './withheld';
+import { GUARD_CANCELLED_HINT, sendWithheld } from './withheld';
 import { dialogDetail, quote } from '../text';
 
 export interface DialogInfo {
@@ -160,14 +160,14 @@ function intercepted(
   if ((guards.own.accepted ?? 0) > 0) {
     return new LayerError(
       'INTERCEPTED',
-      `The click on ${target.description} was cancelled part way: ${hit} was at the click point of a later press${count > 1 ? ` (of ${count} clicks)` : ''}. The presses before it reached the target; no page handler ran for the rest.`,
+      `The click on ${target.description} was cancelled part way: ${hit} was at the click point of a later press${count > 1 ? ` (of ${count} clicks)` : ''}. The presses before it reached the target; the guard stopped the rest before they reached it.`,
       { delivered: true, details: guards },
     );
   }
   return new LayerError(
     'INTERCEPTED',
-    `The click on ${target.description} was cancelled as it arrived: ${hit} was at the click point. No page handler ran.`,
-    { delivered: false, details: guards },
+    `The click on ${target.description} was cancelled as it arrived: ${hit} was at the click point. The guard stopped it before it reached the target, but a script that listens on the whole page in the capture phase may have seen it.`,
+    { delivered: 'unknown', hint: GUARD_CANCELLED_HINT, details: guards },
   );
 }
 

@@ -6,6 +6,7 @@ import { useEffect, useState } from 'react';
 import type { ConversationSummary } from '@src/ui/protocol';
 import { currentLanguage, t } from '@src/ui/i18n';
 import { CloseIcon, DownloadIcon, PencilIcon, TrashIcon } from '@src/ui/icons';
+import { isComposingKey } from './keys';
 
 export function HistoryDrawer({
   open,
@@ -151,7 +152,8 @@ function HistoryRow({
             className="min-w-0 flex-1 rounded-lg border border-nb-border bg-nb-bg px-2 py-1 text-sm focus:border-nb-accent focus:outline-none focus:ring-2 focus:ring-nb-accent/25"
             onChange={e => setTitle(e.target.value)}
             onKeyDown={e => {
-              if (e.key === 'Escape') {
+              // Esc in an input method closes its candidate list; it does not drop the title being typed.
+              if (e.key === 'Escape' && !isComposingKey(e.nativeEvent)) {
                 e.stopPropagation();
                 setEditing(false);
               }

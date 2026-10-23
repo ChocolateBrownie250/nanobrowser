@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { FormFacts } from '../../probe';
-import { classify, enterSubmits } from '../interaction/classify';
+import { AFFIRMATIVE, classify, classifyOption, enterSubmits } from '../interaction/classify';
+import { keyMode } from '../interaction/keys';
 
 const plain: FormFacts = {
   tag: 'button',
@@ -116,6 +117,88 @@ describe('sensitivity classifier', () => {
   });
 });
 
+describe('Chinese vocabulary, Simplified and Traditional', () => {
+  const consent = 'https://id.example/oauth/consent';
+  const onConsent = (name: string) =>
+    classify({ mode: 'activate', name, role: 'button', facts: plain, url: consent }).category;
+
+  it('classifies the Traditional forms like the Simplified ones', () => {
+    for (const name of ['購買', '立即購買', '下單', '結帳', '結算', '儲值', '訂閱', '轉帳', '捐款', '付款', '支付']) {
+      expect(activate(name), name).toBe('pay');
+    }
+    for (const name of ['刪除', '刪除帳號', '移除', '清空', '註銷', '取消訂閱']) {
+      expect(activate(name), name).toBe('delete');
+    }
+    for (const name of [
+      '提交',
+      '發送',
+      '發布',
+      '確認',
+      '保存',
+      '儲存',
+      '更新',
+      '創建',
+      '建立',
+      '批准',
+      '拒絕',
+      '駁回',
+    ]) {
+      expect(activate(name), name).toBe('submit');
+    }
+    // The Simplified forms still work.
+    expect(activate('购买')).toBe('pay');
+    expect(activate('删除')).toBe('delete');
+    expect(activate('发送')).toBe('submit');
+    expect(activate('订阅')).toBe('pay');
+    expect(activate('取消订阅')).toBe('delete');
+    expect(activate('展開')).toBeNull();
+    expect(activate('取消')).toBeNull();
+  });
+
+  it('grants: Traditional access vocabulary', () => {
+    for (const name of ['授權', '授权', '允許訪問', '允许访问', '授予訪問']) {
+      expect(activate(name), name).toBe('grant');
+    }
+  });
+
+  it('a Traditional cookie refusal is not a write, either', () => {
+    expect(activate('拒絕所有')).toBeNull();
+    expect(activate('全部拒絕')).toBeNull();
+    expect(activate('拒絕 Cookie')).toBeNull();
+    expect(activate('拒絕所有', { submitter: true, form: form() })).toBe('submit');
+  });
+
+  it('a generic Chinese confirmation next to an amount is pay (\\b never holds after a Chinese character)', () => {
+    for (const name of ['确认', '確認', '确定', '確定', '继续', '繼續', '下一步']) {
+      expect(activate(`${name} ¥99`, { money: '¥99' }), name).toBe('pay');
+      expect(activate(`${name}¥99`, { money: '¥99' }), name).toBe('pay');
+      expect(activate(name, { money: '¥99' }), name).toBe('pay');
+    }
+    // Without an amount a confirmation is a plain submission (or nothing).
+    expect(activate('确认 ¥99')).toBe('submit');
+    expect(activate('確認')).toBe('submit');
+    expect(activate('确定')).toBeNull();
+    // English keeps its word boundary: "Confirmation" and "Okapi" are not generic labels.
+    expect(activate('Confirm $49', { money: '$49' })).toBe('pay');
+    expect(activate('Okapi', { money: '$49' })).toBeNull();
+    expect(activate('Nextdoor', { money: '$49' })).toBeNull();
+  });
+
+  it('an affirmative Chinese label followed by more characters grants access on a consent page', () => {
+    for (const name of ['允许全部', '允許全部', '允许', '允許', '同意并继续', '接受', '批准']) {
+      expect(AFFIRMATIVE.test(name), name).toBe(true);
+    }
+    expect(onConsent('允许全部')).toBe('grant');
+    expect(onConsent('允許全部')).toBe('grant');
+    expect(onConsent('同意並繼續')).toBe('grant');
+    expect(onConsent('Allow all')).toBe('grant');
+    // Off a consent page it stays a cookie banner's label, not a grant.
+    expect(activate('允许全部')).toBeNull();
+    expect(AFFIRMATIVE.test('Allowance')).toBe(false);
+    expect(AFFIRMATIVE.test('Yesterday')).toBe(false);
+  });
+});
+
 describe('enrichments', () => {
   const field: FormFacts = { ...plain, tag: 'textarea', type: 'textarea', textEntry: true };
 
@@ -152,6 +235,21 @@ describe('enrichments', () => {
       classify({ mode: 'enter', name: 'Search', role: 'searchbox', facts: { ...field, searchField: true } }).category,
     ).toBe(null);
     expect(classify({ mode: 'enter', name: 'Price', role: 'slider', facts: plain }).category).toBe(null);
+  });
+
+  it('item 6: Enter in a contenteditable chat box with a neutral name is a send (mode comes from keyMode)', () => {
+    const chatFacts: FormFacts = { ...plain, tag: 'div', type: '', textEntry: true };
+    for (const host of [
+      { tag: 'div', type: '', contentEditable: true, role: 'textbox' },
+      { tag: 'div', type: '', contentEditable: false, role: 'textbox' },
+      { tag: 'div', type: '', contentEditable: true, role: '' },
+    ]) {
+      const mode = keyMode('Enter', host);
+      expect(mode).toBe('enter');
+      expect(classify({ mode: mode as 'enter', name: 'Message', role: 'textbox', facts: chatFacts }).category).toBe(
+        'submit',
+      );
+    }
   });
 
   it('item 7: "save" and "update" are submission vocabulary', () => {
@@ -192,5 +290,247 @@ describe('enrichments', () => {
 
   it('Enter in a form whose default button is "Create" submits it', () => {
     expect(enter({ form: form({ defaultButton: { name: 'Create', disabled: false } }) })).toBe('submit');
+  });
+});
+
+describe('Chinese vocabulary: the labels shops in Taiwan, Hong Kong and the mainland actually use', () => {
+  it('pay: order, fee and checkout variants in both scripts', () => {
+    for (const name of [
+      '訂購',
+      '订购',
+      '立即訂購',
+      '立即订购',
+      '付費',
+      '付费',
+      '結賬',
+      '结帐',
+      '提交订单',
+      '提交訂單',
+      '确认订单',
+      '確認訂單',
+      '轉賬',
+      '转帐',
+      '匯款',
+      '汇款',
+      '買單',
+      '买单',
+      '下訂',
+      '下订',
+      '預訂',
+      '预订',
+      '打賞',
+      '打赏',
+      '贊助',
+      '赞助',
+      '續費',
+      '续费',
+    ]) {
+      expect(activate(name), name).toBe('pay');
+    }
+    // A subscription that is cancelled is still a deletion, and the other pay words do not hide behind it.
+    expect(activate('取消訂閱')).toBe('delete');
+    expect(activate('取消订阅')).toBe('delete');
+  });
+
+  it('delete: cancelling an order or a booking, unsubscribing, closing an account', () => {
+    for (const name of [
+      '取消订单',
+      '取消訂單',
+      '取消預訂',
+      '取消预订',
+      '退訂',
+      '退订',
+      '取消會員',
+      '取消会员',
+      '關閉帳戶',
+      '关闭账户',
+      '銷毀',
+      '销毁',
+      '丟棄',
+      '丢弃',
+    ]) {
+      expect(activate(name), name).toBe('delete');
+    }
+  });
+
+  it('submit: send, publish, post, register and apply in both scripts', () => {
+    for (const name of [
+      '送出',
+      '發佈',
+      '發表',
+      '发表',
+      '傳送',
+      '传送',
+      '寄出',
+      '發出',
+      '发出',
+      '註冊',
+      '注册',
+      '申請',
+      '申请',
+      '存檔',
+      '登記',
+      '登记',
+    ]) {
+      expect(activate(name), name).toBe('submit');
+    }
+    // Signing in and out is not a write.
+    for (const name of ['登录', '登入', '登出', '登錄', '搜索', '搜尋', '查詢', '取消', '返回', '繼續購物']) {
+      expect(activate(name), name).toBeNull();
+    }
+  });
+});
+
+describe('a generic Chinese confirmation matches as a prefix, except known harmless continuations', () => {
+  it('"continue shopping" and "confirm receipt" next to a price are not payments', () => {
+    for (const name of ['继续购物', '繼續購物', '确认收货', '確認收貨', '继续浏览', '繼續閱讀']) {
+      // Not a payment (a word like 确认 can still be a plain submission).
+      expect(activate(name, { money: '¥99' }), name).not.toBe('pay');
+    }
+    expect(activate('继续购物', { money: '¥99' })).toBeNull();
+    expect(activate('确认收货', { money: '¥99' })).toBe('submit');
+    // The same words with the price written in the label are a paywall step, not a harmless continuation.
+    for (const name of ['继续观看 ¥6', '继续学习 ¥99', '继续阅读全文 ¥1', '繼續閱讀 $2', '确认购物 99元']) {
+      expect(activate(name, { money: '¥6' }), name).toBe('pay');
+    }
+    // A confirmation that names what it does after the generic word is the money step, with an amount next to it.
+    for (const name of ['确认提现', '確認提領', '确认转出', '確定轉出', '确认交易', '确认兑换', '確定匯出']) {
+      expect(activate(name, { money: '¥99' }), name).toBe('pay');
+    }
+    // The real confirmations still are, with or without punctuation, spaces or the amount in the label.
+    for (const name of [
+      '确认',
+      '确认。',
+      '確認！',
+      '确定 ',
+      '继续>',
+      '繼續 »',
+      '下一步 →',
+      '确认 ¥99',
+      '確認$49',
+      '继续（¥99）',
+    ]) {
+      expect(activate(name, { money: '¥99' }), name).toBe('pay');
+    }
+  });
+});
+
+describe('what choosing a select option is gated for', () => {
+  const cls = (label: string) => classifyOption(label)?.category ?? null;
+
+  it('an ordinary choice that says nothing about paying, deleting or access is not gated', () => {
+    for (const label of ['Newest first', 'Save', 'Price: low to high', 'Express shipping', '按价格排序', '最新']) {
+      expect(cls(label), label).toBeNull();
+    }
+  });
+
+  it('payment vocabulary that is not a command is a write (asks in Ask mode), neither silent nor handed over', () => {
+    for (const label of [
+      'Buy',
+      'Buy / Sell',
+      'Pay on delivery',
+      'Pay by card',
+      'Pay with saved card',
+      'Subscribe weekly',
+      'Subscribe',
+      'Top up',
+      'Donate monthly',
+      '购买',
+      '按月订阅',
+      '货到付款',
+      '付款',
+    ]) {
+      expect(cls(label), label).toBe('submit');
+    }
+  });
+
+  it('a pay command keeps its category with an amount or a count next to it', () => {
+    for (const label of [
+      'Pay now - $49',
+      'Pay now – $49.99',
+      'Checkout ($49.99)',
+      'Buy now: €9.99',
+      'Place order (2 items)',
+      'Pay now 49.99 USD',
+      '立即付款 ¥99',
+      '立即支付￥99',
+      '确认付款 ¥99',
+      '提交订单 (¥99)',
+      '去结算（3件）',
+      'Checkout – $49.99 USD',
+      'Pay now Rs. 499',
+      'Pay now NT$499',
+      'Pay now HK$99',
+      'Pay US$9 now',
+      'Pay $49 now',
+      'Pay now 9️⃣',
+    ]) {
+      expect(cls(label), label).toBe('pay');
+    }
+  });
+
+  it('a label that is a command to pay or order is still handed over', () => {
+    for (const label of [
+      'Pay now',
+      'Pay now!',
+      'Buy now',
+      'Place order',
+      'Place your order',
+      'Complete purchase',
+      'Confirm and pay',
+      'Checkout',
+      'Order now',
+      '立即支付',
+      '立即购买',
+      '立即購買',
+      '提交订单',
+      '確認支付',
+    ]) {
+      expect(cls(label), label).toBe('pay');
+    }
+  });
+
+  it('destructive and access labels keep failing closed', () => {
+    for (const label of [
+      'Delete',
+      'Delete account',
+      'Move to Trash',
+      'Remove from list',
+      'Cancel order',
+      'Unsubscribe',
+      '删除账户',
+      '刪除帳號',
+      '取消订单',
+    ]) {
+      expect(cls(label), label).toBe('delete');
+    }
+    expect(cls('Authorize')).toBe('grant');
+    expect(cls('授权')).toBe('grant');
+  });
+});
+
+describe('cancelling an order, a booking or a renewal is a delete in both scripts', () => {
+  it.each([
+    '取消订购',
+    '取消訂購',
+    '取消下订单',
+    '取消下訂單',
+    '取消订单',
+    '取消預訂',
+    '取消自动续费',
+    '取消自動續費',
+    '关闭续费',
+    '關閉續費',
+    '关闭自动续费',
+    '取消订阅',
+  ])('%s', name => {
+    expect(activate(name)).toBe('delete');
+  });
+
+  it('every pay word that excludes a cancellation has its cancellation in the delete list', () => {
+    // The pay words that carry a (?<!取消) lookbehind, with what each cancellation looks like.
+    for (const word of ['订阅', '订购', '预订', '下订', '续费', '訂閱', '訂購', '預訂', '下訂', '續費']) {
+      expect(activate(`取消${word}`), `取消${word}`).toBe('delete');
+    }
   });
 });

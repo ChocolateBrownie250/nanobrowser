@@ -67,9 +67,24 @@ function kindInfo(kind: ProviderKind) {
   return KINDS.find(k => k.kind === kind)!;
 }
 
+/**
+ * The addresses presets had in earlier versions. A provider saved from one is still that preset, a cloud service that
+ * needs a key, although the preset now points elsewhere (Z.ai's Coding Plan was added as an OpenAI-compatible provider
+ * at its chat-completions address). Such providers are not rewritten to the new kind and address: they keep working as
+ * they were saved, and the user can add the preset again.
+ */
+export const LEGACY_PRESET_URLS: readonly string[] = ['https://api.z.ai/api/coding/paas/v4'];
+
+const sameAddress = (a: string | undefined, b: string) => !!a && a.replace(/\/+$/, '') === b.replace(/\/+$/, '');
+
+/** Whether a provider's address is a preset's, current or from an earlier version. */
+export function isPresetAddress(baseUrl: string | undefined): boolean {
+  return [...PRESETS.map(p => p.baseUrl), ...LEGACY_PRESET_URLS].some(url => sameAddress(baseUrl, url));
+}
+
 /** Whether a provider needs a key: its kind does, or it is a preset, a cloud service that always does. */
-function needsKey(provider: ProviderConfig): boolean {
-  return kindInfo(provider.kind).needsKey || PRESETS.some(p => p.baseUrl === provider.baseUrl);
+export function needsKey(provider: Pick<ProviderConfig, 'kind' | 'baseUrl'>): boolean {
+  return kindInfo(provider.kind).needsKey || isPresetAddress(provider.baseUrl);
 }
 
 function updateProvider(id: string, patch: Partial<ProviderConfig>): Promise<void> {
@@ -140,7 +155,10 @@ export function ProvidersSection() {
             <Select
               aria-label={t('agent.reasoning')}
               value={effort.shown}
-              onChange={e => void settingsStorage.set(s => ({ ...s, reasoning: e.target.value as ReasoningEffort }))}>
+              onChange={e => {
+                const reasoning = e.target.value as ReasoningEffort;
+                void settingsStorage.set(s => ({ ...s, reasoning }));
+              }}>
               {effort.pills.map(value => (
                 <option key={value} value={value}>
                   {effortText(value, effortLabelsOf(providers, settings.defaultModel))}
@@ -588,6 +606,8 @@ function DraftField({
         value={draft ?? saved}
         onChange={e => setDraft(e.target.value)}
         onKeyDown={e => {
+          // Enter and Esc of an input method pick a candidate or close the list; they are not the field's.
+          if (e.nativeEvent.isComposing || e.keyCode === 229) return;
           if (e.key === 'Enter' && changed) save();
           else if (e.key === 'Escape' && draft !== null) {
             e.stopPropagation();
@@ -666,6 +686,8 @@ function KeyField({
         value={draft}
         onChange={setDraft}
         onKeyDown={e => {
+          // Enter and Esc of an input method pick a candidate or close the list; they are not the field's.
+          if (e.nativeEvent.isComposing || e.keyCode === 229) return;
           if (e.key === 'Enter') save();
           else if (e.key === 'Escape' && draft) {
             e.stopPropagation();

@@ -40,7 +40,12 @@ export interface Actionable {
   chain: ChainStep[];
   quad: Quad;
   state: ProbeState;
+  /** The target is a hidden checkbox or radio, and the point is on its label: the click goes to the label. */
+  viaLabel: boolean;
 }
+
+/** Says in a receipt's target when the click went to a label in place of the (hidden) input it names. */
+export const VIA_LABEL_NOTE = 'clicked through its label; the input itself is hidden';
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 const TERMINAL = new Set(['NODE_DETACHED', 'TARGET_CHANGED', 'NOT_INTERACTABLE', 'FRAME_DETACHED', 'STALE_DOCUMENT']);
@@ -157,7 +162,7 @@ async function checkOnce(ctx: ToolContext, target: ResolvedTarget, needs: Needs)
   // The wait above can last seconds, and it scrolls: the element that is now actionable must still be the one the
   // session was shown. A node hidden when it was resolved had nothing to compare until now.
   await assertAsShown(ctx, target, { context: true });
-  return { point: top, localPoint: b, chain, quad: again!, state };
+  return { point: top, localPoint: b, chain, quad: again!, state, viaLabel };
 }
 
 /** The receives-events check: in the target's session, then at every process boundary up to the top. */

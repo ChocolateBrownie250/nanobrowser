@@ -184,6 +184,8 @@ defineScenario({
   covers: 'a semantic target must match exactly one node; AMBIGUOUS_TARGET, NO_MATCH',
   async run(ctx) {
     await ctx.open(`${FIXTURE_ORIGIN}/c-states.html`);
+    // A semantic target binds only to elements the agent was shown, so the page is snapshotted first.
+    await ctx.call('snapshot');
     const one = await inspect(ctx, { role: 'button', name: 'Rename me' });
     const many = await inspect(ctx, { role: 'button' });
     const none = await inspect(ctx, { role: 'button', name: 'Nope' });
@@ -258,9 +260,9 @@ defineScenario({
   async run(ctx) {
     const { r, actual, untouched } = await clickSaveDraft(ctx, '?mode=cover');
     return outcome(
-      'INTERCEPTED, delivered false; no click and no mousedown reached any page handler',
+      'INTERCEPTED, delivery unknown (the guard cancelled it as it arrived); no click and no mousedown reached any page handler',
       actual,
-      r.error?.code === 'INTERCEPTED' && r.error.delivered === false && untouched,
+      r.error?.code === 'INTERCEPTED' && r.error.delivered === 'unknown' && untouched,
     );
   },
 });

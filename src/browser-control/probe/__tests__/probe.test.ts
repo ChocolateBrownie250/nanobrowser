@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { PROBE_SOURCE } from '../index';
 
 describe('probe string', () => {
@@ -28,14 +28,37 @@ describe('approximateName, the classifier’s fallback name', () => {
   const scope = {} as Record<string, unknown>;
   new Function('globalThis', PROBE_SOURCE)(scope);
   const probe = scope.__nbProbe as { approximateName(el: unknown): string };
-  /** An element as approximateName reads it: tag, type, value, rendered text and attributes; no labels. */
-  const element = (tagName: string, props: Record<string, unknown>, attrs: Record<string, string> = {}) => ({
-    tagName,
-    innerText: '',
-    labels: [],
-    getAttribute: (name: string) => attrs[name] ?? null,
-    ...props,
+  // The probe reads members through the prototypes of Element and HTMLElement (a form's named controls cannot shadow
+  // them), so the fake element is an instance of fake classes that carry the same accessors.
+  class FakeElement {
+    constructor(
+      readonly fake: { tagName: string; attrs: Record<string, string>; innerText: string },
+      props: Record<string, unknown>,
+    ) {
+      Object.assign(this, props);
+    }
+    get tagName() {
+      return this.fake.tagName;
+    }
+    getAttribute(name: string) {
+      return this.fake.attrs[name] ?? null;
+    }
+  }
+  class FakeHTMLElement extends FakeElement {
+    get innerText() {
+      return this.fake.innerText;
+    }
+  }
+  beforeAll(() => {
+    vi.stubGlobal('Element', FakeElement);
+    vi.stubGlobal('HTMLElement', FakeHTMLElement);
   });
+  afterAll(() => vi.unstubAllGlobals());
+  /** An element as approximateName reads it: tag, type, value, rendered text and attributes; no labels. */
+  const element = (tagName: string, props: Record<string, unknown>, attrs: Record<string, string> = {}) => {
+    const { innerText = '', ...rest } = props as { innerText?: string };
+    return new FakeHTMLElement({ tagName, attrs, innerText }, { labels: [], ...rest });
+  };
 
   it('never names a control that holds a value by what it holds', () => {
     expect(probe.approximateName(element('INPUT', { type: 'password', value: 'hunter2' }))).toBe('');

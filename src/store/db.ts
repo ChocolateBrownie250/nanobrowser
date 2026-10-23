@@ -18,7 +18,8 @@ export const DB_VERSION = 1;
 let opening: Promise<IDBPDatabase<NanoDB>> | null = null;
 
 export function db(): Promise<IDBPDatabase<NanoDB>> {
-  opening ??= openDB<NanoDB>(DB_NAME, DB_VERSION, {
+  if (opening) return opening;
+  const attempt = openDB<NanoDB>(DB_NAME, DB_VERSION, {
     upgrade(database, oldVersion) {
       if (oldVersion < 1) {
         database.createObjectStore('conversations', { keyPath: 'id' }).createIndex('updatedAt', 'updatedAt');
@@ -30,16 +31,29 @@ export function db(): Promise<IDBPDatabase<NanoDB>> {
     },
     blocking() {
       // A newer version is waiting: let it open.
-      void opening?.then(d => d.close());
+      const current = opening;
       opening = null;
+      void current?.then(
+        d => d.close(),
+        () => undefined,
+      );
+    },
+    terminated() {
+      // The browser closed the connection (storage cleared, profile error): the next call opens a new one.
+      if (opening === attempt) opening = null;
     },
   });
-  return opening;
+  opening = attempt;
+  // A failed open is not kept: the next call tries again. (Only when this attempt is still the cached one.)
+  attempt.catch(() => {
+    if (opening === attempt) opening = null;
+  });
+  return attempt;
 }
 
 /** For tests: forget the open connection. */
 export async function closeDb(): Promise<void> {
   const current = opening;
   opening = null;
-  if (current) (await current).close();
+  if (current) (await current.catch(() => null))?.close();
 }

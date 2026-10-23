@@ -51,6 +51,8 @@ import { NO_SUMMARY } from '@src/agent/compaction';
 import { upgradeFromOldVersion } from './upgrade';
 
 const MAX_TRIES = 3;
+/** A send that takes longer than this has failed: it runs inside the serialised chain, which everything else waits on. */
+const POST_TIMEOUT_MS = 10_000;
 const KEEP_DAYS = 7;
 
 const DESTINATION = destinationOf(import.meta.env);
@@ -351,25 +353,40 @@ async function sendQueue(): Promise<void> {
       if (item.body.event === 'usage_day' && !s.analyticsStats) continue;
       // An event its schema refuses is dropped, never sent.
       if (!isValidEvent(item.body)) continue;
-      if (await post(item.body)) continue;
+      const sent = await post(item.body);
+      if (sent === 'sent') continue;
       if (item.tries + 1 < MAX_TRIES) left.push({ ...item, tries: item.tries + 1 });
+      // The destination did not answer in time: the rest wait for the next trigger instead of each taking its own wait.
+      if (sent === 'timeout') {
+        left.push(...queue.slice(queue.indexOf(item) + 1));
+        break;
+      }
     }
     await local.set({ [ANALYTICS_QUEUE_KEY]: left });
   });
 }
 
-/** One event to the destination. */
-async function post(body: SentEvent): Promise<boolean> {
-  if (!DESTINATION) return false;
+/** One event to the destination, with a clock: a stalled connection ends as a failed send. */
+async function post(body: SentEvent): Promise<'sent' | 'failed' | 'timeout'> {
+  if (!DESTINATION) return 'failed';
+  const abort = new AbortController();
+  let timedOut = false;
+  const clock = setTimeout(() => {
+    timedOut = true;
+    abort.abort();
+  }, POST_TIMEOUT_MS);
   try {
     const response = await fetch(DESTINATION.url, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ api_key: DESTINATION.key, ...body }),
+      signal: abort.signal,
     });
-    return response.ok;
+    return response.ok ? 'sent' : 'failed';
   } catch {
-    return false;
+    return timedOut ? 'timeout' : 'failed';
+  } finally {
+    clearTimeout(clock);
   }
 }
 

@@ -14,7 +14,7 @@ const NOTHING: Wire = [undefined, undefined, undefined, undefined];
 const UNKNOWN: Wire = [undefined, 'low', 'medium', 'high'];
 const PRO: Wire = ['medium', 'medium', 'medium', 'high'];
 const HIGH_FOR_MEDIUM: Wire = ['low', 'low', 'high', 'high'];
-/** GLM-5.3: Low, Medium and High send low, high and max, shown as Low, High, Max. */
+/** GLM-5.3 on Z.ai's Anthropic endpoint: Low, Medium and High send low, high and max, shown as Low, High, Max. */
 const GLM: Wire = ['low', 'low', 'high', 'max'];
 
 /** The OpenAI-compatible card at a public host unless a case says otherwise. */
@@ -148,8 +148,13 @@ const MATRIX: Array<[ProviderKind, string, string | null, ReasoningSupport | und
   ['openrouter', 'moonshotai/kimi-k3', 'kimi-k3-openrouter', 'optional', ['none', 'low', 'high', 'high']],
   ['openai-compatible', 'kimi-k3', 'kimi-k3', 'always', HIGH_FOR_MEDIUM],
   ['openai-compatible', 'kimi-k4', 'kimi-family', 'always', ALWAYS],
-  ['openrouter', 'z-ai/glm-5.3', 'glm-5-3', 'always', GLM],
-  ['openai-compatible', 'glm-5.3-flash', 'glm-5-3-flash', 'always', GLM],
+  ['anthropic', 'glm-5.3', 'glm-5-3', 'always', GLM],
+  ['anthropic', 'glm-5.3-flash', 'glm-5-3-flash', 'always', GLM],
+  ['openrouter', 'z-ai/glm-5.3', 'glm-5-3-compat', 'always', HIGH_FOR_MEDIUM],
+  ['openai-compatible', 'glm-5.3-flash', 'glm-5-3-flash-compat', 'always', HIGH_FOR_MEDIUM],
+  ['openai-compatible', 'glm-5.3', 'glm-5-3-compat', 'always', HIGH_FOR_MEDIUM],
+  ['ollama', 'glm-5.3', 'glm-5-3-compat', 'always', HIGH_FOR_MEDIUM],
+  ['lmstudio', 'glm-5.3-flash', 'glm-5-3-flash-compat', 'always', HIGH_FOR_MEDIUM],
   ['openrouter', 'z-ai/glm-5', 'glm-family', 'always', ALWAYS],
   ['openai-compatible', 'glm-6', 'glm-family', 'always', ALWAYS],
   // Qwen on the cloud
@@ -193,12 +198,42 @@ describe('the catalogue', () => {
     expect(REASONING_EFFORTS.map(e => wireEffort(profile, e))).toEqual(wire);
   });
 
-  it("shows GLM-5.3's levels as Low, High and Max", () => {
+  it("shows GLM-5.3's levels as Low, High and Max on Z.ai's Anthropic endpoint only", () => {
     for (const modelName of ['glm-5.3', 'glm-5.3-flash']) {
       const profile = resolveProfile({ kind: 'anthropic', modelName, baseUrl: 'https://api.z.ai/api/anthropic/v1' });
       expect(profile.labels).toEqual({ medium: 'high', high: 'max' });
     }
     expect(resolveProfile({ kind: 'anthropic', modelName: 'claude-sonnet-4-5' }).labels).toBeUndefined();
+  });
+
+  it('sends GLM-5.3 as it did before on every other kind: High is high, never max, and no labels', () => {
+    const others: Array<[ProviderKind, string, string?]> = [
+      ['openrouter', 'z-ai/glm-5.3'],
+      ['openrouter', 'z-ai/glm-5.3-flash'],
+      ['openai-compatible', 'glm-5.3', 'https://api.z.ai/api/coding/paas/v4'],
+      ['openai-compatible', 'glm-5.3-flash', 'https://open.bigmodel.cn/api/paas/v4'],
+      ['ollama', 'glm-5.3'],
+      ['lmstudio', 'glm-5.3-flash'],
+    ];
+    for (const [kind, modelName, baseUrl] of others) {
+      const profile = resolveProfile({ kind, modelName, baseUrl });
+      expect(profile.labels, `${kind} ${modelName}`).toBeUndefined();
+      expect(
+        REASONING_EFFORTS.map(e => wireEffort(profile, e)),
+        `${kind} ${modelName}`,
+      ).toEqual(HIGH_FOR_MEDIUM);
+    }
+  });
+
+  it("names each effort by the value it sends: a row's labels equal its wire, so the two cannot drift", () => {
+    const labelled = rows.filter(r => r.labels);
+    expect(labelled.length).toBeGreaterThan(0);
+    for (const row of labelled) {
+      for (const effort of ['low', 'medium', 'high'] as const) {
+        // The picker's pills are Low, Medium and High; what a pill is called is what it sends.
+        expect(row.labels?.[effort] ?? effort, `${row.id} ${effort}`).toBe(row.wire?.[effort] ?? effort);
+      }
+    }
   });
 
   it('names every row at least once', () => {

@@ -73,6 +73,48 @@ describe('activity rows', () => {
     });
   });
 
+  it('masks the typed and expected text wherever it sits, as a string or a list', () => {
+    expect(
+      maskArgs({
+        target: { ref: 'a1' },
+        value: 'hunter2',
+        expect: {
+          value: 'hunter2',
+          text: 'Welcome back',
+          textGone: ['Sign in', 'Password'],
+          url: 'https://a.example/',
+        },
+        fields: [{ ref: 'a1', value: 'abc', expect: { textGone: 'Error' } }],
+        promptText: 'secret',
+        keys: 'Enter',
+      }),
+    ).toEqual({
+      target: { ref: 'a1' },
+      value: '(7 characters)',
+      expect: {
+        value: '(7 characters)',
+        text: '(12 characters)',
+        textGone: ['(7 characters)', '(8 characters)'],
+        url: 'https://a.example/',
+      },
+      fields: [{ ref: 'a1', value: '(3 characters)', expect: { textGone: '(5 characters)' } }],
+      promptText: '(6 characters)',
+      keys: 'Enter',
+    });
+  });
+
+  it('leaves values that are not text, and the arguments it was given, alone', () => {
+    const args = { value: true, fields: [{ ref: 'a1', value: false }], expect: { value: ['a'] } };
+    expect(maskArgs(args)).toEqual({
+      value: true,
+      fields: [{ ref: 'a1', value: false }],
+      expect: { value: ['(1 characters)'] },
+    });
+    expect(args.expect.value).toEqual(['a']);
+    expect(maskArgs(undefined)).toBeUndefined();
+    expect(maskArgs('text')).toBe('text');
+  });
+
   it('names the page read when the run began', () => {
     expect(activityLine(row('opened', undefined)).label).toBe('Looked at the page');
   });

@@ -1,8 +1,8 @@
 // The page header: a short block after the last message of every request, never stored, so the cached prefix stays
 // intact. Every page string in it is a quoted fragment; everything else is the extension's own text.
-import { quote } from '@src/browser-control';
 import type { PendingModal, TabsData } from '@src/browser-control';
 import type { PermissionMode } from '@src/store/types';
+import { agentQuote as quote, defuseQuotes } from './safe-text';
 
 export interface HeaderInput {
   now: Date;
@@ -45,7 +45,7 @@ export function browserState(input: HeaderInput): string {
   if (others.length) lines.push(`other tabs: ${others.map(t => tabLine(t, input.tabInfo(t.tabId)?.rev)).join(' · ')}`);
   for (const tab of input.tabs.tabs) {
     for (const p of input.tabInfo(tab.tabId)?.pending ?? [])
-      lines.push(`pending: ${p.kind} on tab ${tab.tabId}: ${p.detail}`);
+      lines.push(`pending: ${p.kind} on tab ${tab.tabId}: ${defuseQuotes(p.detail)}`);
   }
   for (const c of input.changed) {
     lines.push(`tab ${c.tabId} changed since you last saw it (now ${quote(c.url)}); earlier refs may be stale`);

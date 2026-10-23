@@ -2,6 +2,7 @@
 // over the same UserPrompt channel and pending-modal state as the confirmation gate.
 import { LayerError } from '../../protocol/errors';
 import type { AskUserArgs } from '../../protocol/schemas';
+import { checkCancelled } from '../controller';
 import type { ToolContext, ToolOutcome } from '../controller';
 import type { AskAnswer, AskRequest } from '../ports';
 import { snapshot } from './observe';
@@ -26,6 +27,8 @@ export async function askUser(ctx: ToolContext, args: AskUserArgs): Promise<Tool
     message: args.message,
     origin,
   };
+  // A signal that is already aborted never fires its event: a cancelled call opens no card.
+  checkCancelled(ctx);
   // While the person works in the page, the layer sends no input to the tab.
   const modal = { kind: 'user-request' as const, detail: `${args.kind}: ${args.message}` };
   tab.pending.push(modal);

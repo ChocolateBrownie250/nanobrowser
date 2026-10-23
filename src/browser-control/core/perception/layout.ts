@@ -1,6 +1,7 @@
 // Perception tier 2: DOMSnapshot.captureSnapshot decoded and joined with the accessibility tree.
 // It finds what the accessibility tree leaves out (a clickable div is a nameless generic node there) and gives
 // geometry to the window and the budget (step 3.2). Live input values in the snapshot are never printed.
+import { sliceWhole } from '../text';
 
 /** The computed styles requested, in this order (about ten). */
 export const LAYOUT_STYLES = [
@@ -104,7 +105,7 @@ export interface LayoutDocument {
  * below builds node by node as the probe does.
  */
 export function digestText(raw: string, max = 80): string {
-  return raw.replace(/\s+/g, ' ').trim().slice(0, max);
+  return sliceWhole(raw.replace(/\s+/g, ' ').trim(), max);
 }
 
 /**
@@ -157,7 +158,7 @@ export function decodeSnapshot(snapshot: RawSnapshot, scale = 1): LayoutDocument
           if (inShadow.has(i) === own) out = (out + str(n.nodeValue?.[i])).replace(/\s+/g, ' ').trimStart();
         } else for (const c of ownTree(i).reverse()) stack.push(c);
       }
-      return out.trim().slice(0, max);
+      return sliceWhole(out.trim(), max);
     };
     const textCache = new Map<string, string>();
     const textOf = (root: number, separator: string): string => {

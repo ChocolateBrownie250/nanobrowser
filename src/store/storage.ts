@@ -4,6 +4,7 @@ export type StorageArea = 'local' | 'session';
 
 export interface Storage<D> {
   get(): Promise<D>;
+  /** An updater runs when its write's turn comes, after the caller returned: read anything mutable (an event's target) first. */
   set(value: D | ((previous: D) => D | Promise<D>)): Promise<void>;
   /** The last value read or written; null before the first read. */
   getSnapshot(): D | null;
@@ -28,15 +29,24 @@ export function createStorage<D>(
     return cache;
   };
 
+  // Writes run one after another, and an updater reads the stored value only when its turn comes, so two sets started
+  // together both land (a read-modify-write on a cache would lose one).
+  let writes: Promise<void> = Promise.resolve();
+
   const storage: Storage<D> = {
     get,
-    async set(value) {
-      const previous = cache ?? (await get());
-      const next =
-        typeof value === 'function' ? await (value as (previous: D) => D | Promise<D>)(previous) : (value as D);
-      cache = next;
-      await chromeStorage()?.set({ [key]: next });
-      emit();
+    set(value) {
+      const write = async () => {
+        const next =
+          typeof value === 'function' ? await (value as (previous: D) => D | Promise<D>)(await get()) : (value as D);
+        cache = next;
+        await chromeStorage()?.set({ [key]: next });
+        emit();
+      };
+      const result = writes.then(write);
+      // A failed write rejects its own caller only; the next write still runs.
+      writes = result.catch(() => undefined);
+      return result;
     },
     getSnapshot: () => cache,
     subscribe(listener) {

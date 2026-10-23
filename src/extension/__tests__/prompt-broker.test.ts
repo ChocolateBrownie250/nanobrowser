@@ -96,6 +96,32 @@ describe('PromptBroker', () => {
     expect(await pending).toBe('given-back');
   });
 
+  it('withdraws the cards of a tab that closed, and only that tab’s', async () => {
+    const { b, events } = broker();
+    const never = new AbortController().signal;
+    const write = b.userPrompt().confirm(request, never);
+    const handover = b.open<string>('c1', 'handover', {}, never, { tabId: 7 });
+    const ask = b.userPrompt().ask({ id: 'a', tabId: 7, kind: 'input', message: 'code?', origin: '' }, never);
+    const other = b.open<string>('c1', 'handover', {}, never, { tabId: 8 });
+    const noTab = b.open<string>('c1', 'save-file', {}, never);
+    await new Promise(r => setTimeout(r, 0));
+    expect(b.promptsOf('c1')).toHaveLength(5);
+    b.withdrawTab(7);
+    expect(await write).toBe('decline');
+    expect(await handover).toBe('withdrawn');
+    expect(await ask).toEqual({ outcome: 'cancel' });
+    expect(b.promptsOf('c1').map(p => p.tabId)).toEqual([8, undefined]);
+    expect(events.filter(([, e]) => e.type === 'prompt_closed' && e.outcome === 'withdrawn')).toHaveLength(3);
+    // The cards of other tabs are still waiting.
+    let settled = false;
+    void Promise.race([other, noTab]).then(() => (settled = true));
+    await new Promise(r => setTimeout(r, 0));
+    expect(settled).toBe(false);
+    // A second call, and a late answer, change nothing.
+    b.withdrawTab(7);
+    expect(b.promptsOf('c1')).toHaveLength(2);
+  });
+
   it('declines a prompt for a tab no conversation owns', async () => {
     const { b } = broker();
     expect(await b.userPrompt().confirm({ ...request, tabId: 99 }, new AbortController().signal)).toBe('decline');

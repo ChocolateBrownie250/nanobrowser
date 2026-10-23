@@ -6,6 +6,7 @@
 //     request) is replaced with about:blank and reported.
 import type { TabAttachment } from './ports';
 import { quote } from './text';
+import { isBlankPage, isBrowserErrorPage } from './url-policy';
 
 export const SAFE_URL = 'about:blank';
 
@@ -27,6 +28,8 @@ interface RequestPaused {
 export class NavigationGuard {
   #events: PolicyEvent[] = [];
   #intercepting = false;
+  /** Calls to sync run one after the other, so two of them cannot leave the flag different from the browser. */
+  #syncing: Promise<void> = Promise.resolve();
   #offs: Array<() => void> = [];
 
   constructor(
@@ -49,8 +52,14 @@ export class NavigationGuard {
     return this.#intercepting;
   }
 
-  /** Switches layer 3 on or off to match the policy. */
-  async sync(): Promise<void> {
+  /** Switches layer 3 on or off to match the policy. Rejects when the browser did not take the change. */
+  sync(): Promise<void> {
+    const run = this.#syncing.then(() => this.#sync());
+    this.#syncing = run.catch(() => undefined);
+    return run;
+  }
+
+  async #sync(): Promise<void> {
     const want = this.listsConfigured();
     if (want === this.#intercepting) return;
     if (want) {
@@ -81,9 +90,10 @@ export class NavigationGuard {
 
   async #onPaused(event: RequestPaused): Promise<void> {
     const { cdp, topology } = this.attachment;
-    const mainFrame = event.frameId === topology.mainFrameId();
     let allow = true;
     try {
+      // Inside the try: if the main frame cannot be named, the request is failed, not left paused.
+      const mainFrame = event.frameId === topology.mainFrameId();
       allow = !mainFrame || event.resourceType !== 'Document' || this.allowed(event.request.url);
     } catch {
       allow = false; // fail closed
@@ -106,7 +116,8 @@ export class NavigationGuard {
   }
 
   async #onCommitted(url: string): Promise<void> {
-    if (!url || url === SAFE_URL || this.allowed(url)) return;
+    // The blank page and Chrome's page for a failed load hold nothing of any site; replacing them would only hide the error.
+    if (!url || url === SAFE_URL || isBlankPage(url) || isBrowserErrorPage(url) || this.allowed(url)) return;
     this.#events.push({
       layer: 4,
       url,

@@ -4,9 +4,10 @@
 // model). The model's reasoning parts are read and discarded: no reasoning is stored or sent back.
 import { jsonSchema, streamText, tool } from 'ai';
 import type { JSONSchema7, ModelMessage, ToolSet } from 'ai';
+import { modelTimeouts } from './providers';
 import type { ChatModel } from './providers';
 import type { WireEffort } from './catalogue';
-import { errorText, getApiCallStatusCode, isRetryable, retryAfterMs, unwrapError } from './errors';
+import { errorText, getApiCallStatusCode, isRetryable, ModelTimeoutError, retryAfterMs, unwrapError } from './errors';
 import { isContextOverflow } from './overflow';
 import { withSlot } from './limiter';
 
@@ -44,7 +45,7 @@ export interface TurnResult {
   finish: TurnFinish;
   /** Null when the server reported no usage. */
   usage: TokenUsage | null;
-  error?: { message: string; status?: number; overflow: boolean; network?: boolean };
+  error?: { message: string; status?: number; overflow: boolean; network?: boolean; timeout?: true };
   durationMs: number;
   attempts: number;
   /**
@@ -67,6 +68,13 @@ export interface RetryPolicy {
 }
 
 export const DEFAULT_RETRY: RetryPolicy = { attempts: 3, baseMs: 1000, maxMs: 30_000 };
+
+/**
+ * A Retry-After longer than this is not waited for: the turn ends with the provider's message, which has the reset
+ * time. It sits above a per-minute window (a limit that resets within the minute is waited out) and below the hour
+ * windows of a quota.
+ */
+export const MAX_RETRY_AFTER_MS = 120_000;
 
 export interface TurnRequest {
   chat: ChatModel;
@@ -98,6 +106,20 @@ export function toToolSet(tools: Record<string, ToolDefinition>): ToolSet {
   );
 }
 
+/** A wait as the user reads it: seconds, minutes or hours. */
+function waitText(ms: number): string {
+  const seconds = Math.ceil(ms / 1000);
+  if (seconds < 120) return `${seconds} seconds`;
+  const minutes = Math.ceil(seconds / 60);
+  return minutes < 120 ? `${minutes} minutes` : `${Math.ceil(minutes / 60)} hours`;
+}
+
+/** The SDK's timeout aborts its own call with a TimeoutError (or an AbortError) while the user's signal is untouched. */
+function isTimeoutAbort(error: unknown): boolean {
+  const e = unwrapError(error);
+  return e instanceof Error && (e.name === 'TimeoutError' || e.name === 'AbortError');
+}
+
 function sleepFor(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise(resolve => {
     const timer = setTimeout(resolve, ms);
@@ -110,7 +132,8 @@ function sleepFor(ms: number, signal?: AbortSignal): Promise<void> {
 
 export function backoffMs(attempt: number, policy: RetryPolicy, error: unknown, random = Math.random): number {
   const asked = retryAfterMs(error);
-  if (asked !== undefined) return Math.min(asked, policy.maxMs);
+  // A wait the provider asked for is waited as asked: sooner would only meet the same limit again.
+  if (asked !== undefined) return Math.min(asked, MAX_RETRY_AFTER_MS);
   const exp = policy.baseMs * 2 ** (attempt - 1);
   return Math.min(policy.maxMs, exp / 2 + random() * (exp / 2));
 }
@@ -144,9 +167,17 @@ export function refusesReasoning(status: number | undefined, message: string): b
   return status === 400 && /reasoning|thinking|effort/i.test(message);
 }
 
-/** A 400 that names an image: the model does not take images. */
+/**
+ * A complaint about one image's size or encoding ("image exceeds 5 MB maximum", "invalid base64 data", "could not
+ * process image"), which says nothing about whether the model takes images. A refusal such as "At most 0 images" or
+ * "Invalid content type. image_url is only supported by certain models" is not one.
+ */
+const IMAGE_FAULT =
+  /exceed|too (large|big|small)|\bmaximum\b|base64|corrupt|truncated|malformed|invalid image|image (is )?invalid|(could not|couldn't|failed to|unable to|cannot) (process|decode|load|read|parse)[^.]{0,20}image|unsupported (image|media|format|file)|media type|image format/i;
+
+/** A 400 that names an image as something the model does not take; not one that faults this image's size or format. */
 export function refusesImages(status: number | undefined, message: string): boolean {
-  return status === 400 && /image|vision|multimodal/i.test(message);
+  return status === 400 && /image|vision|multimodal/i.test(message) && !IMAGE_FAULT.test(message);
 }
 
 /** The note an image is replaced with when the model refused images. */
@@ -196,14 +227,19 @@ async function streamTurnNow(request: TurnRequest): Promise<TurnResult> {
   let messages = request.messages;
   let imagesDropped = false;
   let reasoningIgnored = false;
+  // The SDK's timeout takes the first-output and between-output limits; the header limit is the fetch's (providers.ts).
+  const { firstChunkMs, chunkMs } = modelTimeouts(request.chat.spec);
+  const limits = { firstChunkMs, chunkMs };
   for (;;) {
     attempt++;
     let text = '';
     let started = false;
     const toolCalls: ToolCallRequest[] = [];
     let finish: TurnFinish = 'other';
+    let rawFinish: string | undefined;
     let usage: TokenUsage | null = null;
     let failure: unknown;
+    let silentAfterAnswer = false;
     // A server that takes the effort as a provider option gets it there, and the SDK's `reasoning` is left out.
     const effortOptions = reasoning ? request.chat.reasoningOptions?.(reasoning) : undefined;
     try {
@@ -217,6 +253,8 @@ async function streamTurnNow(request: TurnRequest): Promise<TurnResult> {
         ...(reasoning && !effortOptions ? { reasoning } : {}),
         maxRetries: 0,
         abortSignal: request.signal,
+        // A silent connection or a stalled stream ends the attempt; the Stop button's signal still wins below.
+        timeout: limits,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         providerOptions: (effortOptions ?? request.chat.providerOptions) as any,
         onError: () => undefined,
@@ -228,9 +266,10 @@ async function streamTurnNow(request: TurnRequest): Promise<TurnResult> {
             text += part.text;
             request.onTextDelta?.(part.text);
             break;
-          // Reasoning is discarded, but it has started the reply: an error after it is not retried.
+          // Reasoning is discarded, but it has started the reply: an error after it is not retried. An empty delta (a
+          // signature-only block) does not count: the SDK's timer does not take it for output either.
           case 'reasoning-delta':
-            started = true;
+            if (part.text) started = true;
             break;
           case 'tool-call': {
             started = true;
@@ -252,6 +291,7 @@ async function streamTurnNow(request: TurnRequest): Promise<TurnResult> {
             break;
           case 'finish':
             finish = part.finishReason;
+            rawFinish = part.rawFinishReason;
             usage = usage ?? toUsage(part.totalUsage);
             break;
           case 'abort':
@@ -268,13 +308,60 @@ async function streamTurnNow(request: TurnRequest): Promise<TurnResult> {
     if (request.signal?.aborted) {
       return { text, toolCalls: [], finish: 'aborted', usage, durationMs: Date.now() - start, attempts: attempt };
     }
+    // The SDK's own timeout aborts the call without the user's signal: that is a stalled server, not a Stop.
+    const silent = () =>
+      new ModelTimeoutError(Math.round((started ? limits.chunkMs : limits.firstChunkMs) / 1000), started);
+    if ((failure === undefined && finish === 'aborted') || (failure !== undefined && isTimeoutAbort(failure))) {
+      failure = silent();
+      // The server answered and then sent nothing: it is thinking or stuck, and the same request would be too (and be
+      // billed again). Only a server that never answered at all (the header timeout) is asked again.
+      silentAfterAnswer = true;
+    }
     if (failure === undefined) {
+      // The server's own end-of-context signal: the window filled during the reply, which is an overflow.
+      if (rawFinish === 'model_context_window_exceeded') {
+        return {
+          text,
+          toolCalls: [],
+          finish: 'error',
+          usage,
+          error: {
+            message:
+              'The conversation no longer fits in the context window (finish reason: model_context_window_exceeded).',
+            overflow: true,
+          },
+          durationMs: Date.now() - start,
+          attempts: attempt,
+          ...(reasoningDropped ? { reasoningDropped } : {}),
+          ...(imagesDropped ? { imagesDropped } : {}),
+        };
+      }
+      // A reply with no text and no calls that did not end naturally (Z.ai's "sensitive", a content filter, a cut
+      // stream) is a failure, not a model that had nothing to say.
+      if (!text && !toolCalls.length && (finish === 'other' || finish === 'content-filter' || finish === 'error')) {
+        return {
+          text,
+          toolCalls: [],
+          finish: 'error',
+          usage,
+          error: {
+            message: `The model stopped without an answer (finish reason: ${rawFinish ?? finish}).`,
+            overflow: false,
+          },
+          durationMs: Date.now() - start,
+          attempts: attempt,
+          ...(reasoningDropped ? { reasoningDropped } : {}),
+          ...(imagesDropped ? { imagesDropped } : {}),
+        };
+      }
       const cost = usage && usage.cost === undefined ? await request.chat.takeCost?.() : undefined;
       if (usage && cost !== undefined) usage = { ...usage, cost };
       return {
         text,
         toolCalls,
-        finish,
+        // A server that names no finish reason at all, after an answer, finished it; one that names a reason the SDK
+        // does not know ("sensitive", a vendor string) did not say so, and the loop reads that as unfinished.
+        finish: finish === 'other' && rawFinish === undefined && text.trim() ? 'stop' : finish,
         usage,
         durationMs: Date.now() - start,
         attempts: attempt,
@@ -307,7 +394,11 @@ async function streamTurnNow(request: TurnRequest): Promise<TurnResult> {
       attempt--;
       continue;
     }
-    if (!started && attempt < policy.attempts && isRetryable(failure)) {
+    // A provider that asks for a long wait (a spent window, a daily limit) is not waited for: the error goes to the
+    // user with its own text and the wait.
+    const asked = retryAfterMs(failure);
+    const tooLong = asked !== undefined && asked > MAX_RETRY_AFTER_MS && isRetryable(failure);
+    if (!started && !silentAfterAnswer && !tooLong && attempt < policy.attempts && isRetryable(failure)) {
       await sleep(backoffMs(attempt, policy, failure), request.signal);
       if (request.signal?.aborted) {
         return { text, toolCalls: [], finish: 'aborted', usage, durationMs: Date.now() - start, attempts: attempt };
@@ -321,11 +412,14 @@ async function streamTurnNow(request: TurnRequest): Promise<TurnResult> {
       finish: 'error',
       usage,
       error: {
-        message: errorText(failure),
+        message: tooLong
+          ? `${errorText(failure)} (the provider asks to wait ${waitText(asked)} before trying again)`
+          : errorText(failure),
         status: getApiCallStatusCode(failure),
         overflow: isContextOverflow(failure),
         // fetch rejects with a TypeError when the network fails.
         network: unwrapError(failure) instanceof TypeError,
+        ...(unwrapError(failure) instanceof ModelTimeoutError ? { timeout: true as const } : {}),
       },
       durationMs: Date.now() - start,
       attempts: attempt,

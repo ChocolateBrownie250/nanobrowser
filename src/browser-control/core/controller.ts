@@ -9,7 +9,16 @@ import { resolveTarget } from './interaction/resolve';
 import { waitForActionable } from './interaction/actionability';
 import type { ActionReceipt, PageState, PendingModal, Result } from '../protocol/results';
 import { TabLocks } from './lock';
-import type { Attacher, EpochStore, TabAttachment, TabHost, UserPrompt, WriteDecision, WriteQuestion } from './ports';
+import type {
+  Attacher,
+  DetachInfo,
+  EpochStore,
+  TabAttachment,
+  TabHost,
+  UserPrompt,
+  WriteDecision,
+  WriteQuestion,
+} from './ports';
 import type { ConfirmPolicy } from './interaction/gate';
 import { KnownSet, RefRegistry, reserveEpoch } from './refs';
 import type { Epoch } from './refs';
@@ -277,7 +286,13 @@ export class Controller {
       );
     }
     const state = this.tabState(tabId);
-    if (state.attachment && !state.attachment.detached) return state.attachment;
+    if (state.attachment && !state.attachment.detached) {
+      // Layer 3 must match the policy: a change that did not reach the browser is retried here, before any action.
+      if (state.guard && state.guard.intercepting !== this.#policiesFor(tabId).some(hasLists)) {
+        await this.#syncGuard(tabId, state.guard, state.attachment);
+      }
+      return state.attachment;
+    }
     if (state.detachedByUser) {
       throw new LayerError(
         'DEBUGGER_DETACHED',
@@ -293,7 +308,10 @@ export class Controller {
             await attachment.close().catch(() => undefined);
             throw new LayerError('DEBUGGER_DETACHED', `Tab ${tabId} was released while it was being attached.`);
           }
-          state.attachment = attachment;
+          // A connection another attach shared and the layer closed since is of no use; the next attach opens a new one.
+          if (attachment.detached) {
+            throw new LayerError('DEBUGGER_DETACHED', `Tab ${tabId} was detached while it was being attached.`);
+          }
           state.capture = { enabledSessions: new Set() };
           state.probe = new ProbeClient(attachment.cdp);
           // Any navigation ends the reuse of the last capture.
@@ -344,8 +362,11 @@ export class Controller {
             state.pendingRelease = null;
             state.released = release ? release().catch(() => undefined) : null;
           });
-          attachment.onDetach(info => {
-            if (state.attachment !== attachment) return;
+          // The attachment is published to the tab only once layer 3 is active; a detach before that is kept and
+          // applied then.
+          let published = false;
+          const early: { info: DetachInfo | null } = { info: null };
+          const forget = (info: DetachInfo) => {
             state.guard?.dispose();
             state.guard = null;
             state.probe = null;
@@ -358,17 +379,42 @@ export class Controller {
             state.released = null;
             if (info.reason === 'canceled_by_user') state.detachedByUser = true;
             this.registry.tabDetached(tabId);
+          };
+          attachment.onDetach(info => {
+            if (!published) {
+              early.info = info;
+              return;
+            }
+            if (state.attachment !== attachment) return;
+            forget(info);
           });
-          return attachment;
-        })
-        .then(async attachment => {
           // Layer 3 is active before any action on the tab.
-          state.guard = new NavigationGuard(
+          const guard = new NavigationGuard(
             attachment,
             url => this.allowedFor(tabId)(url),
             () => this.#policiesFor(tabId).some(hasLists),
           );
-          await state.guard.sync();
+          state.guard = guard;
+          try {
+            await this.#syncGuard(tabId, guard, attachment);
+          } catch (error) {
+            guard.dispose();
+            state.guard = null;
+            state.probe = null;
+            throw error;
+          }
+          // The tab was released, or the debugger left, while layer 3 was being switched on.
+          if (this.#tabs.get(tabId) !== state) {
+            await attachment.close().catch(() => undefined);
+            throw new LayerError('DEBUGGER_DETACHED', `Tab ${tabId} was released while it was being attached.`);
+          }
+          const lost = early.info ?? attachment.detached;
+          if (lost) {
+            forget(lost);
+            throw new LayerError('DEBUGGER_DETACHED', `The debugger detached from tab ${tabId} (${lost.reason}).`);
+          }
+          published = true;
+          state.attachment = attachment;
           return attachment;
         })
         .finally(() => {
@@ -389,9 +435,42 @@ export class Controller {
     return combinePolicies(this.#policiesFor(tabId));
   }
 
-  /** Re-applies layer 3 to every attached tab after a policy changed. */
+  /**
+   * Switches layer 3 of a tab to match its policy. When the browser does not take the change, the tab is not left
+   * unguarded: its connection is closed (the next attach starts again and tries once more) and the call fails.
+   */
+  async #syncGuard(tabId: number, guard: NavigationGuard, attachment: TabAttachment): Promise<void> {
+    try {
+      await guard.sync();
+    } catch (error) {
+      await attachment.close().catch(() => undefined);
+      const cause = error instanceof Error ? error.message : String(error);
+      throw new LayerError(
+        'DEBUGGER_DETACHED',
+        `Tab ${tabId} was disconnected because the navigation policy could not be applied to it (${cause}).`,
+      );
+    }
+  }
+
+  /**
+   * Re-applies layer 3 to every attached tab after a policy changed. A tab that could not be updated is disconnected
+   * (see #syncGuard) and the first failure is thrown once every tab has been tried.
+   */
   async syncPolicies(): Promise<void> {
-    await Promise.all([...this.#tabs.values()].map(state => state.guard?.sync().catch(() => undefined)));
+    const failures: unknown[] = [];
+    await Promise.all(
+      [...this.#tabs.values()].map(async state => {
+        // A tab still attaching applies the policy itself, and the next attach checks it again.
+        if (!state.guard || !state.attachment) return;
+        await this.#syncGuard(state.tabId, state.guard, state.attachment).catch(error => void failures.push(error));
+      }),
+    );
+    if (failures.length) throw failures[0];
+  }
+
+  /** `syncPolicies` for a caller that cannot wait: a tab that failed is already disconnected, so the failure is logged. */
+  syncPoliciesQuietly(): void {
+    this.syncPolicies().catch(error => console.error('[browser-control] policy sync failed', error));
   }
 
   /** A session holds the tab: Memory Saver must not discard it meanwhile. */
@@ -580,7 +659,7 @@ export class Session {
     this.#tabs.add(tabId);
     this.#active = tabId;
     this.controller.tabState(tabId).detachedByUser = false;
-    void this.controller.syncPolicies();
+    this.controller.syncPoliciesQuietly();
     this.controller.held(tabId);
     this.hooks.onTabJoined?.(tabId, how);
   }
@@ -589,7 +668,7 @@ export class Session {
   adoptTab(tabId: number): void {
     this.#tabs.add(tabId);
     if (this.#active === null) this.#active = tabId;
-    void this.controller.syncPolicies();
+    this.controller.syncPoliciesQuietly();
     this.controller.held(tabId);
     this.hooks.onTabJoined?.(tabId, 'page-opened');
   }

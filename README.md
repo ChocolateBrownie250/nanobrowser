@@ -61,7 +61,7 @@ Nanobrowser is an open-source AI agent that works in your own browser. Tell it a
 | Submit, send, delete or upload | Asks you first | Goes ahead |
 | Pay, enter a password or code, grant access | Hands the step to you | Hands the step to you |
 
-You can also set a site to **Allow** (go ahead in both modes), **Ask** (ask in both modes) or **Block** (the agent may not use it), in Settings → Permissions.
+You can also set a site to **Allow** (go ahead in both modes), **Ask** (ask in both modes) or **Block** (the agent may not open or act on the site's pages, subdomains included; a frame of a blocked site embedded in another site is not covered), in Settings → Permissions.
 
 > [!NOTE]
 > **You are always in charge.**
@@ -74,7 +74,7 @@ You can also set a site to **Allow** (go ahead in both modes), **Ask** (ask in b
 
 | Kind | Providers |
 | --- | --- |
-| Cloud | Anthropic, OpenAI, Google Gemini, OpenRouter, xAI Grok, DeepSeek, Mistral, and any OpenAI-compatible endpoint |
+| Cloud | Anthropic, OpenAI, Google Gemini, OpenRouter, xAI Grok, DeepSeek, Mistral, Z.ai GLM (Coding Plan), and any OpenAI-compatible endpoint |
 | Local | Ollama and LM Studio, and other servers (llama.cpp, vLLM and others) through the OpenAI-compatible provider |
 
 - **A model must support tool calling.** Test models in Settings checks each model and marks the ones that cannot be used.

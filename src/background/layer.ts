@@ -1,5 +1,5 @@
 // The browser control layer in the test extension: one controller, one session for the test panel.
-import { argsJsonSchema } from '@src/browser-control';
+import { argsJsonSchema, releaseLeftoverDebuggerSessions } from '@src/browser-control';
 import { controllerReady, setFallbackPrompt } from '@src/extension/layer';
 import type { AuditEntry, Capability, ConfirmPolicy, Controller, Session, UrlPolicy } from '@src/browser-control';
 import { emit, register } from './rpc';
@@ -19,6 +19,31 @@ export interface LayerState {
 let controller: Controller;
 let session: Session;
 const audit: AuditEntry[] = [];
+/** The audit ring holds at most this many entries and this many characters of them, whichever is reached first. */
+const AUDIT_MAX_ENTRIES = 500;
+const AUDIT_MAX_CHARS = 1_000_000;
+let auditChars = 0;
+const auditSizes: number[] = [];
+
+function keepAudit(entry: AuditEntry): void {
+  let size = 0;
+  try {
+    size = JSON.stringify(entry).length;
+  } catch {
+    // An entry that cannot be measured counts as small; its arguments are redacted already.
+  }
+  audit.push(entry);
+  auditSizes.push(size);
+  auditChars += size;
+  while (audit.length > AUDIT_MAX_ENTRIES || (auditChars > AUDIT_MAX_CHARS && audit.length > 1)) {
+    audit.shift();
+    auditChars -= auditSizes.shift() ?? 0;
+  }
+}
+
+// Debugger sessions an earlier worker left on tabs are released now, and every attach waits for it. The listeners of
+// chrome.debugger are registered here, synchronously at worker start.
+void releaseLeftoverDebuggerSessions();
 
 setFallbackPrompt(panelPrompt);
 
@@ -36,8 +61,7 @@ export const ready: Promise<void> = controllerReady.then(c => {
     if (capabilities) session.setCapabilities(capabilities);
   });
   c.onAudit(entry => {
-    audit.push(entry);
-    if (audit.length > 500) audit.shift();
+    keepAudit(entry);
     emit('audit', entry);
   });
 });

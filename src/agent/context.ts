@@ -4,6 +4,17 @@
 import type { ModelMessage } from '@src/llm';
 import type { Entry, EntryOf, MessagePart, StoredMessage } from '@src/store/types';
 import { applyCompaction, latestCompaction } from './compaction';
+import { note } from './records';
+
+/** The result a call gets when none was recorded (a worker killed or a write failed mid-batch). */
+export const MISSING_RESULT =
+  'error INTERNAL (delivery unknown)\nNo result was recorded for this call. Look at the page before retrying.';
+
+/** The line that stands in for an image that is no longer sent. */
+export const IMAGE_DROPPED_LINE = note('an image is attached here, but it is no longer sent to you.');
+
+/** The most images of one message that are sent: a message with a few pictures keeps them all. */
+const MAX_MESSAGE_IMAGES = 4;
 
 type UserPart = { type: 'text'; text: string } | { type: 'image'; image: string; mediaType: string };
 type AssistantPart =
@@ -59,9 +70,14 @@ function userParts(parts: MessagePart[], images: { keep: Set<MessagePart> }): Us
   const out: UserPart[] = [];
   for (const p of parts) {
     if (p.type === 'text') out.push({ type: 'text', text: p.text });
-    else if (p.type === 'image' && images.keep.has(p)) {
-      out.push({ type: 'text', text: p.note });
-      out.push({ type: 'image', image: p.data, mediaType: p.mediaType });
+    else if (p.type === 'image') {
+      if (images.keep.has(p)) {
+        out.push({ type: 'text', text: p.note });
+        out.push({ type: 'image', image: p.data, mediaType: p.mediaType });
+      } else {
+        // A dropped image leaves one line, so the model knows something was shown and is gone.
+        out.push({ type: 'text', text: IMAGE_DROPPED_LINE });
+      }
     }
   }
   return out;
@@ -73,8 +89,34 @@ function userParts(parts: MessagePart[], images: { keep: Set<MessagePart> }): Us
  */
 export function groupResults(entries: Array<EntryOf<'message'>>): Array<EntryOf<'message'>> {
   const out: Array<EntryOf<'message'>> = [];
-  let waiting = new Set<string>();
+  // The calls of the last reply that have no result yet, by id, with the reply they belong to.
+  let waiting = new Map<string, string>();
+  let owner: EntryOf<'message'> | null = null;
   let held: Array<EntryOf<'message'>> = [];
+  // A call whose result was never recorded gets an error result, so the conversation can always be sent: providers
+  // refuse a request in which a call has no result. This only happens once something else follows the call.
+  const closeOrphans = () => {
+    if (waiting.size && owner) {
+      out.push({
+        type: 'message',
+        id: `${owner.id}:missing`,
+        parentId: owner.id,
+        conversationId: owner.conversationId,
+        at: owner.at,
+        message: {
+          role: 'tool',
+          parts: [...waiting].map(([toolCallId, toolName]) => ({
+            type: 'tool-result' as const,
+            toolCallId,
+            toolName,
+            text: MISSING_RESULT,
+            isError: true,
+          })),
+        },
+      });
+    }
+    waiting = new Map();
+  };
   const flush = () => {
     out.push(...held);
     held = [];
@@ -88,14 +130,22 @@ export function groupResults(entries: Array<EntryOf<'message'>>): Array<EntryOf<
       continue;
     }
     if (m.role === 'assistant') {
+      closeOrphans();
       flush();
       out.push(e);
-      waiting = new Set(m.parts.filter(p => p.type === 'tool-call').map(p => (p as { toolCallId: string }).toolCallId));
+      owner = e;
+      waiting = new Map(
+        m.parts
+          .filter((p): p is Extract<MessagePart, { type: 'tool-call' }> => p.type === 'tool-call')
+          .map(p => [p.toolCallId, p.toolName]),
+      );
       continue;
     }
     if (waiting.size) held.push(e);
     else out.push(e);
   }
+  // At the end, calls still waiting are in flight, unless a message of the user or a note already follows them.
+  if (held.length) closeOrphans();
   flush();
   return out;
 }
@@ -106,9 +156,26 @@ export function toModelMessages(branch: Entry[], options: ContextOptions): Model
   const compaction = latestCompaction(branch);
   if (compaction) entries = applyCompaction(entries, compaction, options.unverified ?? new Set());
   // Images to keep: the newest ones, and none for a model without vision.
-  const allImages = entries.flatMap(e => e.message.parts.filter(p => p.type === 'image'));
+  // The newest image the user attached and the newest the agent's screenshot took are kept separately, so a screenshot
+  // does not push out the picture the user asked about.
   const keepCount = options.vision ? (options.keepImages ?? 1) : 0;
-  const keep = new Set<MessagePart>(keepCount ? allImages.slice(-keepCount) : []);
+  const imagesOf = (tool: boolean) =>
+    entries.flatMap(e => ((e.message.role === 'tool') === tool ? e.message.parts.filter(p => p.type === 'image') : []));
+  // All the pictures of the newest message that has some are kept together (the user asked about them as a set).
+  const newestUserImages =
+    entries
+      .filter(e => e.message.role !== 'tool' && e.message.parts.some(p => p.type === 'image'))
+      .at(-1)
+      ?.message.parts.filter(p => p.type === 'image') ?? [];
+  const keep = new Set<MessagePart>(
+    keepCount
+      ? [
+          ...imagesOf(false).slice(-keepCount),
+          ...newestUserImages.slice(-MAX_MESSAGE_IMAGES),
+          ...imagesOf(true).slice(-keepCount),
+        ]
+      : [],
+  );
 
   const out: ModelMessage[] = [];
   const push = (message: ModelMessage) => {

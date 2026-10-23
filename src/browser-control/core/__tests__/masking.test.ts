@@ -1,15 +1,18 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { RefRegistry } from '../refs';
-import type { Capture, FrameCapture } from '../perception/capture';
+import type { Capture, FieldFacts, FrameCapture } from '../perception/capture';
+import type { ProbeState } from '../../probe';
 import type { AXNode } from '../perception/ax';
 import { buildFrameTree, renderLines } from '../perception/outline';
 import { buildObservation } from '../perception/observe';
 import { redactArgs } from '../redact';
 import {
+  isSecretField,
   isSensitiveField,
   isSensitiveLabel,
   isSensitiveOption,
+  isSensitiveState,
   listedOption,
   quotedOption,
 } from '../perception/masking';
@@ -68,6 +71,133 @@ describe('code fields by name and label', () => {
   it('prints ordinary code fields', () => {
     for (const label of ['Promo code', 'Zip code', 'Postal code', 'Coupon code', 'Discount code', 'Country code']) {
       expect(field(label.toLowerCase().replace(' ', '_'), label)).toBe(false);
+    }
+  });
+});
+
+describe('secret fields named in Chinese, and card and PIN codes', () => {
+  const field = (name: string, label = '', facts: Partial<FieldFacts> = {}) =>
+    isSensitiveField({ tag: 'input', type: 'text', name, ...facts }, label, '123456');
+  const state = (over: Partial<ProbeState>): ProbeState =>
+    ({
+      tag: 'input',
+      type: 'text',
+      autocomplete: '',
+      name: '',
+      id: '',
+      placeholder: '',
+      value: '123456',
+      ...over,
+    }) as ProbeState;
+
+  it('masks a field whose label is a Simplified or Traditional Chinese secret term', () => {
+    for (const label of [
+      '验证码',
+      '驗證碼',
+      '短信验证码',
+      '校验码',
+      '校驗碼',
+      '动态码',
+      '動態碼',
+      '密码',
+      '密碼',
+      '登录密码',
+      '口令',
+      '卡号',
+      '卡號',
+      '信用卡號',
+      '银行卡',
+      '銀行卡',
+      '安全码',
+      '安全碼',
+    ]) {
+      expect(field('x', label), label).toBe(true);
+      // The same words as a name or id attribute.
+      expect(field(label), label).toBe(true);
+      expect(isSensitiveField({ tag: 'input', type: 'text', id: label }, '', '1234'), label).toBe(true);
+      expect(isSecretField(state({ name: 'x' }), label), label).toBe(true);
+    }
+  });
+
+  it('matches cv2, cvn and pin as words, not inside other words', () => {
+    for (const name of [
+      'cv2',
+      'CV2',
+      'cvn',
+      'pin',
+      'PIN',
+      'pin_code',
+      'pin-code',
+      'user_pin',
+      'card.pin',
+      'pin1',
+      'userPin',
+    ]) {
+      expect(field(name), name).toBe(true);
+    }
+    expect(field('x', 'Enter your PIN')).toBe(true);
+    expect(field('x', 'CVN')).toBe(true);
+    for (const name of ['spinner', 'shipping', 'pinterest', 'opinion', 'mapping', 'discover', 'cv']) {
+      expect(field(name), name).toBe(false);
+    }
+    expect(field('x', 'Pinterest board')).toBe(false);
+    expect(isSecretField(state({ id: 'pin' }), '')).toBe(true);
+    expect(isSecretField(state({ id: 'shipping' }), '')).toBe(false);
+  });
+
+  it('prints a postal PIN code, but keeps masking a secret PIN', () => {
+    // The browser says it is a postal code, or the label has address words and no secret ones.
+    expect(field('pin_code', 'PIN code', { autocomplete: 'postal-code' })).toBe(false);
+    expect(field('pin', '', { autocomplete: 'postal-code' })).toBe(false);
+    expect(field('postal_pin', 'Postal PIN code')).toBe(false);
+    expect(field('pin_code', 'PIN code of your delivery address')).toBe(false);
+    expect(field('pin_code', 'PIN code, area')).toBe(false);
+    expect(field('x', '', { placeholder: 'Enter 6 digit PIN code of the city' })).toBe(false);
+    expect(isSecretField(state({ name: 'pin_code', autocomplete: 'postal-code' }), 'PIN code')).toBe(false);
+    expect(isSecretField(state({ name: 'pin_code' }), 'PIN code (postal address)')).toBe(false);
+    expect(isSensitiveState(state({ name: 'pin', autocomplete: 'postal-code', value: '560001' }), 'PIN')).toBe(false);
+    // A PIN with nothing that says postal is a secret, and so is anything with a secret word next to it.
+    expect(field('pin', 'PIN')).toBe(true);
+    expect(field('pin_code', 'PIN code')).toBe(true);
+    expect(field('pin_code', 'Enter your PIN code')).toBe(true);
+    expect(field('atm_pin', 'ATM PIN')).toBe(true);
+    expect(field('pin', 'Card PIN')).toBe(true);
+    expect(field('pin', 'Security PIN for your account address')).toBe(true);
+    expect(field('pin', 'Verification PIN')).toBe(true);
+    // Mentioning an address, a city or a district is not saying "postal": a mailed or locker PIN is still a secret.
+    expect(field('pin', 'Enter the PIN we mailed to your address')).toBe(true);
+    expect(field('pin', 'PIN from the letter sent to your street address')).toBe(true);
+    expect(field('pin', 'Parcel locker PIN (pickup address)')).toBe(true);
+    expect(field('pin', 'Locker PIN for your district hub')).toBe(true);
+    expect(field('pin', 'Electricity board PIN')).toBe(true);
+    // A PIN that is sent to the user is a one-time secret, whatever address it mentions.
+    expect(field('pin_code', 'Enter the PIN code we mailed to your address')).toBe(true);
+    expect(field('pin_code', 'PIN code sent to your registered address')).toBe(true);
+    expect(field('pin_code', 'PIN code from the letter to your address')).toBe(true);
+    expect(field('pin_code', 'PIN code received by SMS (city)')).toBe(true);
+    expect(field('address-pin', 'PIN')).toBe(true);
+    expect(field('pin', 'PIN', { placeholder: 'City / area' })).toBe(true);
+    expect(field('pin', 'Area PIN')).toBe(true);
+    expect(field('pin', 'PIN', { autocomplete: 'one-time-code' })).toBe(true);
+    expect(field('pin', 'Postal PIN', { type: 'password' })).toBe(true);
+    expect(isSecretField(state({ name: 'pin' }), 'PIN')).toBe(true);
+    expect(isSecretField(state({ name: 'pin', autocomplete: 'one-time-code' }), 'Delivery area PIN')).toBe(true);
+  });
+
+  it('also reads the placeholder, so an unlabelled field is still masked', () => {
+    expect(field('f1', '', { placeholder: '请输入验证码' })).toBe(true);
+    expect(field('f1', '', { placeholder: '請輸入密碼' })).toBe(true);
+    expect(field('f1', '', { placeholder: 'Enter PIN' })).toBe(true);
+    expect(field('f1', '', { placeholder: 'Enter your name' })).toBe(false);
+    expect(isSecretField(state({ placeholder: '验证码' }), '')).toBe(true);
+    expect(isSecretField(state({ placeholder: 'Your name' }), '')).toBe(false);
+    expect(isSensitiveState(state({ placeholder: '驗證碼' }), '')).toBe(true);
+    expect(isSensitiveState(state({ placeholder: 'Search' }), '')).toBe(false);
+  });
+
+  it('still prints ordinary fields named in Chinese', () => {
+    for (const label of ['姓名', '郵遞區號', '邮编', '优惠码', '優惠碼', '手机号']) {
+      expect(field('x', label), label).toBe(false);
     }
   });
 });

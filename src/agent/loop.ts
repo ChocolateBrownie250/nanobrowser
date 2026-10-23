@@ -18,6 +18,7 @@ import type { DebtEntry } from './completion';
 import { Guards } from './guards';
 import { contextThreshold, elisionChunk, hardLimit, planElision } from './elision';
 import { runCompaction, runShorten } from './compaction';
+import { defuseText, safeHead } from './safe-text';
 import { attachmentBytes, attachmentParts, readAttachment } from './attachments';
 import { learnFrom, turnEffort } from './run';
 import type { ResolvedModel } from './run';
@@ -34,6 +35,16 @@ export const CONTEXT_LIMIT =
 /** A reply that was all reasoning: cut by the output limit before any text or call. */
 export const CUT_BEFORE_ANYTHING =
   "The model's reply was cut before it said anything. Try again, or choose a lower reasoning effort.";
+
+/** A text reply cut by the output limit: what was written is above, and may be incomplete. */
+export const CUT_TEXT_REPLY =
+  'The reply was cut off by the output limit, so it may be incomplete. Ask Nanobrowser to continue, or choose a lower reasoning effort.';
+
+/** A reply the provider's filter stopped. */
+export const FILTERED_REPLY = 'The provider stopped the reply (its content filter). Try rephrasing the request.';
+
+/** A reply the provider ended for a reason that is not a normal stop. */
+export const ABNORMAL_REPLY = 'The provider ended the reply early, for a reason other than finishing it. Try again.';
 
 /** The notice when a server refused the reasoning option and the run went on without it. */
 export const REASONING_DROPPED = 'This model did not take the reasoning setting; continuing without it.';
@@ -245,6 +256,8 @@ export class AgentLoop {
         rebuilt = await this.prepareRequest();
         tokens = this.estimate(rebuilt);
       }
+      // Stop during the summary call: no further step changes the context; the run ends as stopped.
+      if (this.options.signal.aborted) return {};
     }
     // Step 3: the recent part is shortened when the estimate is still over the threshold.
     if (tokens > threshold && (await this.shorten())) {
@@ -295,6 +308,7 @@ export class AgentLoop {
     if (this.#overflowStage === 0) {
       this.#overflowStage = 1;
       if (await this.compact()) return true;
+      if (this.options.signal.aborted) return false;
     }
     if (this.#overflowStage === 1) {
       this.#overflowStage = 2;
@@ -717,6 +731,17 @@ export class AgentLoop {
     }
     if (this.#guardStop) return this.salvage(this.#guardStop.reason, `guard_${this.#guardStop.guard}`);
     if (!reply.toolCalls.length) {
+      // A reply without calls that did not end normally is not an answer: the run does not claim success for it. The
+      // text it wrote stays in the conversation, so the user can read what there is.
+      const unfinished = this.#unfinished(reply);
+      if (unfinished)
+        return {
+          status: 'failed',
+          outcome: unfinished.outcome,
+          ...unfinished.end,
+          usage: this.#usage,
+          turns: this.#turns,
+        };
       if (!this.#mutated) return { status: 'done', outcome: 'success', usage: this.#usage, turns: this.#turns };
       // Plain text after a mutation: one note, then partial.
       this.#plainEndings++;
@@ -727,6 +752,18 @@ export class AgentLoop {
       return null;
     }
     if (this.#turns >= this.options.turnCap) return this.salvage('the run reached its turn limit.', 'cap');
+    return null;
+  }
+
+  /** Why a reply with no calls cannot count as the end of the work, when its finish says so. */
+  #unfinished(reply: TurnResult): { outcome: 'partial' | 'failed'; end: Pick<LoopEnd, 'reason' | 'cause'> } | null {
+    const outcome = reply.text.trim() ? 'partial' : 'failed';
+    if (reply.finish === 'length') return { outcome, end: { reason: CUT_TEXT_REPLY, cause: 'cut' } };
+    if (reply.finish === 'content-filter') return { outcome, end: { reason: FILTERED_REPLY, cause: 'provider' } };
+    // `error` is a finish the provider reported without a stream error (Gemini's malformed function call is one).
+    if (reply.finish === 'other' || reply.finish === 'error') {
+      return { outcome, end: { reason: ABNORMAL_REPLY, cause: 'provider' } };
+    }
     return null;
   }
 
@@ -782,6 +819,7 @@ export class AgentLoop {
         await this.storeHeader();
         const request = await this.prepareRequest();
         const check = await this.prepareNextTurn(request);
+        if (signal.aborted) return this.#end({ status: 'stopped' });
         if (check.stop) return this.#end({ status: 'failed', outcome: 'failed', reason: check.stop, cause: 'context' });
         this.#turns++;
         emit({ type: 'turn_start', turn: this.#turns });
@@ -803,6 +841,7 @@ export class AgentLoop {
             });
           }
           if (await this.recoverFromOverflow(sent)) continue;
+          if (signal.aborted) return this.#end({ status: 'stopped' });
           // The provider's overflow error, when there was one, is kept for the counts.
           const providerError = reply.error && {
             status: reply.error.status,
@@ -996,6 +1035,11 @@ export class AgentLoop {
     };
     if (reply.finish === 'length') {
       await skipRest(0, CUT_REPLY);
+      // No call ran, but the turn failed: replies that keep being cut end the run through the error guard.
+      if (calls.length) {
+        const verdict = this.guards.recordCut();
+        if (verdict.stop) this.#guardStop ??= { reason: verdict.stop, guard: 'errors' };
+      }
       return outcomes;
     }
     // A control call ends a reply: what follows it is skipped.
@@ -1057,7 +1101,42 @@ export class AgentLoop {
   /** Whether the user has sent a message while the run works. Set by the extension. */
   hasSteering: () => boolean = () => false;
 
+  /**
+   * Runs one call. Whatever throws inside (a store write, a Chrome call) becomes an error result for the call, so the
+   * reply never has a call without a result, which no provider accepts in the next request.
+   */
   async #execute(call: ToolCallRequest): Promise<CallOutcome> {
+    try {
+      return await this.#executeCall(call);
+    } catch (error) {
+      const args = (call.input ?? {}) as Record<string, unknown>;
+      const kind = kindOf(call.toolName, args);
+      const why = error instanceof Error ? error.message : String(error);
+      const outcome: CallOutcome = {
+        call,
+        kind,
+        isError: true,
+        text: `error INTERNAL (delivery unknown)\nThe extension failed while running ${call.toolName}: ${safeHead(defuseText(why), 300)}\nLook at the page before retrying.`,
+      };
+      const verdict = this.guards.record(call.toolName, args, undefined, true);
+      if (verdict.stop) this.#guardStop ??= { reason: verdict.stop, guard: verdict.guard ?? 'errors' };
+      // A page action may have reached the page: it counts as acted, and its outcome is unverified until observed.
+      if (PAGE_ACTIONS.has(call.toolName)) {
+        this.#mutated = true;
+        const tabId = (args.tabId as number | undefined) ?? this.#activeTab ?? -1;
+        this.#debt.push({
+          toolCallId: call.toolCallId,
+          tabId,
+          state: 'open',
+          label: `${call.toolName} on tab ${tabId}`,
+          rev: this.options.layer.tabInfo(tabId)?.rev ?? 0,
+        });
+      }
+      return outcome;
+    }
+  }
+
+  async #executeCall(call: ToolCallRequest): Promise<CallOutcome> {
     const { emit, signal } = this.options;
     const args = (call.input ?? {}) as Record<string, unknown>;
     const kind = kindOf(call.toolName, args);

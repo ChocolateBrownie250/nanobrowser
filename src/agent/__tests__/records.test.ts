@@ -1,7 +1,7 @@
 import 'fake-indexeddb/auto';
 import { afterEach, describe, expect, it } from 'vitest';
 import { IDBFactory } from 'fake-indexeddb';
-import { activeBranch, createConversation, getRun, putRun } from '@src/store/conversations';
+import { activeBranch, createConversation, getRun, patchRun, putRun } from '@src/store/conversations';
 import { closeDb } from '@src/store/db';
 import { EMPTY_GUARDS, ZERO_USAGE } from '@src/store/types';
 import { note, openCalls, RunWriter, storedResult } from '../records';
@@ -103,5 +103,33 @@ describe('run records', () => {
     expect(await new RunWriter(c.id, 'r1').run({ status: 'done' })).toMatchObject({ runId: 'r2', status: 'running' });
     await new RunWriter(c.id, 'r2').run({ status: 'done', outcome: 'success' });
     expect(await getRun(c.id)).toMatchObject({ status: 'done', outcome: 'success' });
+  });
+
+  it('merges the loop and the worker writes of one record without putting back an older copy', async () => {
+    const c = await createConversation({ mode: 'ask' });
+    await putRun({
+      conversationId: c.id,
+      runId: 'r1',
+      leafEntryId: null,
+      status: 'running',
+      steering: [],
+      turns: 0,
+      usage: ZERO_USAGE,
+      debt: [],
+      guards: EMPTY_GUARDS,
+      tabs: [],
+      startedAt: '',
+      updatedAt: '',
+    });
+    const w = new RunWriter(c.id, 'r1');
+    // Started together, as the loop's progress write and the worker's status write are: each must land on the row as
+    // the other left it.
+    await Promise.all([
+      w.run({ turns: 3 }),
+      patchRun(c.id, 'r1', { status: 'awaiting_user', reason: 'card' }),
+      w.run({ debt: [] }),
+      patchRun(c.id, 'r1', stored => ({ turns: stored.turns + 1 })),
+    ]);
+    expect(await getRun(c.id)).toMatchObject({ status: 'awaiting_user', reason: 'card', turns: 4 });
   });
 });

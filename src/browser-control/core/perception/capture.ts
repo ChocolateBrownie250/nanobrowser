@@ -18,6 +18,8 @@ export interface FieldFacts {
   autocomplete?: string;
   name?: string;
   id?: string;
+  /** The placeholder attribute: it can name a secret field that has no label ("验证码", "PIN"). */
+  placeholder?: string;
 }
 
 export interface FrameCapture extends FrameRecord {
@@ -111,6 +113,7 @@ async function fieldFacts(cdp: CdpPort, sessionId: SessionId, nodes: AXNode[]): 
           autocomplete: a.autocomplete?.toLowerCase(),
           name: a.name,
           id: a.id,
+          placeholder: a.placeholder,
         };
       } catch {
         // Unknown facts: the layout snapshot's attributes are used, or the value is masked (outline.ts).

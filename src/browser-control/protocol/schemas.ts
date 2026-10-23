@@ -4,15 +4,35 @@ import { z } from 'zod';
 
 const ref = z.string().min(1).max(64).describe('A ref from the latest observation, such as "e12"');
 
+// Upper bounds on what an agent may send, so one call cannot hold a tab's lock for minutes or fill the worker's memory.
+/** Text typed key by key: every character holds the tab's lock, so the bound keeps one call from running for minutes. */
+const MAX_TEXT = 20_000;
+/** A value set into a field in one command (and the value an expectation compares), as large as a `read` returns. */
+const MAX_VALUE = 200_000;
+/** Names, roles, search strings, selectors and expectations. */
+const MAX_STRING = 2_000;
+/** An address (the common limit for a URL). */
+const MAX_URL = 8_192;
+/** The largest attached file is 25 MiB (store/attachments MAX_FILE), which is 34 952 536 base64 characters. */
+const MAX_BASE64 = 35_000_000;
+const MAX_FIELDS = 50;
+
+/** The value of a field: text, a checkbox state, or the options chosen in a list. */
+const fieldValue = z.union([z.string().max(MAX_VALUE), z.boolean(), z.array(z.string().max(MAX_VALUE)).max(100)]);
+
 export const RefTargetSchema = z.strictObject({ ref });
 export const SemanticTargetSchema = z.strictObject({
-  role: z.string().min(1).describe('Accessibility role, such as "button" or "link"'),
-  name: z.string().optional().describe('Accessible name; matched exactly after whitespace is collapsed'),
+  role: z.string().min(1).max(MAX_STRING).describe('Accessibility role, such as "button" or "link"'),
+  name: z
+    .string()
+    .max(MAX_STRING)
+    .optional()
+    .describe('Accessible name; matched exactly after whitespace is collapsed'),
   nth: z.number().int().min(0).optional().describe('Zero-based index among the matches, in document order'),
   within: ref.optional().describe('Only match inside the element with this ref'),
 });
 export const SelectorTargetSchema = z.strictObject({
-  selector: z.string().min(1).describe('CSS selector (capability "selector")'),
+  selector: z.string().min(1).max(MAX_STRING).describe('CSS selector (capability "selector")'),
 });
 export const PointTargetSchema = z.strictObject({
   x: z.number().describe('CSS pixels of the last screenshot (capability "vision")'),
@@ -24,10 +44,10 @@ export const TargetSchema = z
 
 export const ExpectationSchema = z
   .strictObject({
-    url: z.string().optional().describe('The page URL contains this text'),
-    text: z.string().optional().describe('This text is on the page'),
-    textGone: z.string().optional().describe('This text is no longer on the page'),
-    value: z.string().optional().describe("The target's value equals this"),
+    url: z.string().max(MAX_STRING).optional().describe('The page URL contains this text'),
+    text: z.string().max(MAX_STRING).optional().describe('This text is on the page'),
+    textGone: z.string().max(MAX_STRING).optional().describe('This text is no longer on the page'),
+    value: z.string().max(MAX_VALUE).optional().describe("The target's value equals this"),
     checked: z.boolean().optional().describe('The target is checked (true) or unchecked (false)'),
     gone: z.boolean().optional().describe('The target is no longer in the page'),
   })
@@ -63,9 +83,9 @@ export const SnapshotArgsSchema = z.strictObject({
 
 export const FindArgsSchema = z.strictObject({
   ...readCommon,
-  role: z.string().optional(),
-  name: z.string().optional().describe('Substring of the accessible name, case-insensitive'),
-  text: z.string().optional().describe('Substring of the element’s name or value, case-insensitive'),
+  role: z.string().max(MAX_STRING).optional(),
+  name: z.string().max(MAX_STRING).optional().describe('Substring of the accessible name, case-insensitive'),
+  text: z.string().max(MAX_STRING).optional().describe('Substring of the element’s name or value, case-insensitive'),
   within: ref.optional(),
   limit: z.number().int().min(1).max(200).optional(),
 });
@@ -96,28 +116,29 @@ export const ClickArgsSchema = z.strictObject({
 export const SetArgsSchema = z.strictObject({
   ...actionCommon,
   target: TargetSchema,
-  value: z.union([z.string(), z.boolean(), z.array(z.string())]),
+  value: fieldValue,
   submit: z.boolean().optional().describe('Press Enter after setting the value'),
 });
 
 export const FillFormArgsSchema = z.strictObject({
   ...actionCommon,
   fields: z
-    .array(z.strictObject({ target: TargetSchema, value: z.union([z.string(), z.boolean(), z.array(z.string())]) }))
-    .min(1),
+    .array(z.strictObject({ target: TargetSchema, value: fieldValue }))
+    .min(1)
+    .max(MAX_FIELDS),
   submit: TargetSchema.optional().describe('Activate this element after every field is set'),
 });
 
 export const TypeArgsSchema = z.strictObject({
   ...actionCommon,
-  text: z.string(),
+  text: z.string().max(MAX_TEXT),
   target: TargetSchema.optional(),
   submit: z.boolean().optional(),
 });
 
 export const PressArgsSchema = z.strictObject({
   ...actionCommon,
-  keys: z.string().min(1).describe('A key or chord, such as "Enter", "Escape" or "Control+A"'),
+  keys: z.string().min(1).max(MAX_STRING).describe('A key or chord, such as "Enter", "Escape" or "Control+A"'),
   target: TargetSchema.optional(),
 });
 
@@ -133,31 +154,31 @@ export const ScrollArgsSchema = z.strictObject({
 export const WaitArgsSchema = z.strictObject({
   ...readCommon,
   observe: ObserveSchema.optional(),
-  text: z.string().optional(),
-  textGone: z.string().optional(),
+  text: z.string().max(MAX_STRING).optional(),
+  textGone: z.string().max(MAX_STRING).optional(),
   target: TargetSchema.optional(),
   state: z.enum(['visible', 'hidden', 'attached', 'detached', 'enabled']).optional(),
-  url: z.string().optional(),
+  url: z.string().max(MAX_STRING).optional(),
   ms: z.number().int().min(0).max(60_000).optional(),
 });
 
 export const NavigateArgsSchema = z.strictObject({
   ...actionCommon,
-  url: z.string().optional(),
+  url: z.string().max(MAX_URL).optional(),
   action: z.enum(['back', 'forward', 'reload']).optional(),
 });
 
 export const TabsArgsSchema = z.strictObject({
   intent: readCommon.intent,
   action: z.enum(['list', 'open', 'select', 'close']),
-  url: z.string().optional(),
+  url: z.string().max(MAX_URL).optional(),
   tabId: z.number().int().optional(),
 });
 
 export const HandleDialogArgsSchema = z.strictObject({
   ...actionCommon,
   accept: z.boolean(),
-  promptText: z.string().optional(),
+  promptText: z.string().max(MAX_TEXT).optional(),
 });
 
 /**
@@ -168,13 +189,13 @@ export const HandleDialogArgsSchema = z.strictObject({
 export const UploadArgsSchema = z.strictObject({
   ...actionCommon,
   target: TargetSchema.optional().describe('The file input; leave out to fill the pending file chooser'),
-  paths: z.array(z.string().min(1)).min(1).max(20).optional(),
+  paths: z.array(z.string().min(1).max(4_096)).min(1).max(20).optional(),
   attachments: z
     .array(
       z.strictObject({
         name: z.string().min(1).max(255),
         mimeType: z.string().max(255),
-        base64: z.string(),
+        base64: z.string().max(MAX_BASE64),
       }),
     )
     .min(1)

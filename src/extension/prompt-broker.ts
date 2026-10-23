@@ -102,6 +102,17 @@ export class PromptBroker {
     }
   }
 
+  /**
+   * Withdraws every card that names a tab (it closed, or the debugger left it): the wait ends with the tab, as the layer
+   * promises, and an approval could no longer reach the page anyway.
+   */
+  withdrawTab(tabId: number): void {
+    for (const w of [...this.#open.values()]) {
+      if (w.prompt.tabId !== tabId) continue;
+      if (this.#close(w.prompt.id, 'withdrawn')) w.resolve('withdrawn');
+    }
+  }
+
   /** The layer's prompts for tabs the product's sessions hold (src/extension/layer.ts routes them here). */
   userPrompt(): UserPrompt {
     return {

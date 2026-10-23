@@ -10,7 +10,7 @@ export type ReasoningEffort = 'none' | 'low' | 'medium' | 'high';
 
 /**
  * The `reasoning` values the extension may send; the compiler holds each to the SDK's type. `max` goes out only where a
- * row maps an effort to it (Z.ai's GLM, whose top level it is).
+ * row maps an effort to it (GLM on Z.ai's Anthropic-compatible endpoint, whose top level it is).
  */
 export const WIRE_EFFORTS = [
   'none',
@@ -76,7 +76,7 @@ export const defaults: CatalogueDefaults = {
 const cloud = (contextWindow: number, maxOutput: number, vision = true) => ({ contextWindow, maxOutput, vision });
 const local = (contextWindow: number, vision = false) => ({ contextWindow, maxOutput: 4096, vision });
 const D = '2026-10-10';
-/** GLM's scale: Low, Medium and High send low, high and max. */
+/** GLM's scale on Z.ai's Anthropic-compatible endpoint: Low, Medium and High send low, high and max. */
 const GLM_WIRE = { medium: 'high', high: 'max' } as const;
 const GLM_LABELS = { medium: 'high', high: 'max' } as const;
 /** The local-server kinds: a row scoped to them says nothing about the same name on a cloud endpoint. */
@@ -160,9 +160,13 @@ export const rows: CatalogueRow[] = [
   { id: 'kimi-k3-openrouter', match: /^kimi-k3(?:-|:|$)/, kinds: ['openrouter'], ...cloud(1_048_576, 943_718), reasoning: 'optional', wire: { medium: 'high' }, checked: D, source: 'https://openrouter.ai/api/v1/models (Kimi K3 top_provider and reasoning)' },
   { id: 'kimi-k3', match: /^kimi-k3/, ...cloud(1_000_000, 32_000), reasoning: 'always', wire: { medium: 'high' }, checked: D, source: 'https://platform.kimi.ai/docs/guide/kimi-k3-quickstart; https://platform.kimi.ai/docs/guide/use-reasoning-effort (output maximum unpublished; 32000 is a conservative fallback)' },
   { id: 'kimi-family', match: /^kimi-/, family: true, ...cloud(1_000_000, 32_000), reasoning: 'always', checked: D, source: FAMILY },
-  // GLM-5.3's three levels are low, high and max (max is the API's default); the picker shows them as Low, High, Max.
-  { id: 'glm-5-3-flash', match: /^glm-5\.3-flash(?:x)?(?:-|$)/, ...cloud(1_000_000, 128_000), reasoning: 'always', wire: GLM_WIRE, labels: GLM_LABELS, checked: '2026-10-18', source: 'https://docs.z.ai/guides/vlm/glm-5.3-flash' },
-  { id: 'glm-5-3', match: /^glm-5\.3/, ...cloud(1_000_000, 128_000, false), reasoning: 'always', wire: GLM_WIRE, labels: GLM_LABELS, checked: '2026-10-18', source: 'https://docs.z.ai/guides/llm/glm-5.3 (reasoning effort low, high, max)' },
+  // GLM-5.3's three levels are low, high and max (max is the API's default) on Z.ai's Anthropic-compatible endpoint, so the
+  // picker shows them as Low, High, Max there. Other kinds (OpenRouter, an OpenAI-compatible host, a local server) speak
+  // their own scale and keep the plain map, which the second pair of rows holds.
+  { id: 'glm-5-3-flash', match: /^glm-5\.3-flash(?:x)?(?:-|$)/, kinds: ['anthropic'], ...cloud(1_000_000, 128_000), reasoning: 'always', wire: GLM_WIRE, labels: GLM_LABELS, checked: '2026-10-18', source: 'https://docs.z.ai/guides/vlm/glm-5.3-flash' },
+  { id: 'glm-5-3', match: /^glm-5\.3/, kinds: ['anthropic'], ...cloud(1_000_000, 128_000, false), reasoning: 'always', wire: GLM_WIRE, labels: GLM_LABELS, checked: '2026-10-18', source: 'https://docs.z.ai/guides/llm/glm-5.3 (reasoning effort low, high, max)' },
+  { id: 'glm-5-3-flash-compat', match: /^glm-5\.3-flash(?:x)?(?:-|$)/, ...cloud(1_000_000, 128_000), reasoning: 'always', wire: { medium: 'high' }, checked: D, source: 'https://docs.z.ai/guides/vlm/glm-5.3-flash' },
+  { id: 'glm-5-3-compat', match: /^glm-5\.3/, ...cloud(1_000_000, 128_000, false), reasoning: 'always', wire: { medium: 'high' }, checked: D, source: 'https://docs.z.ai/guides/llm/glm-5.3' },
   { id: 'glm-family', match: /^glm-/, family: true, ...cloud(1_000_000, 128_000), reasoning: 'always', checked: D, source: FAMILY },
   // Qwen on the cloud (QwenCloud through the OpenAI-compatible card, and OpenRouter); local Qwen is below
   { id: 'qwen3-8-max-openrouter', match: /^qwen3\.8-max(?:-(?:0902|prime|\d{8}))?$/, kinds: ['openrouter'], ...cloud(1_000_000, 131_072), reasoning: 'always', checked: D, source: 'https://openrouter.ai/api/v1/models (Qwen3.8 Max 0902 and Prime reasoning); https://openrouter.ai/api/v1/models/qwen/qwen3.8-max/endpoints' },

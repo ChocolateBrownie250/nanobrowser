@@ -2,6 +2,7 @@
 // frames and closed shadow roots are included and masked values stay masked.
 import type { ONode } from './outline';
 import { MASK } from './masking';
+import { sliceWhole } from '../text';
 
 const BLOCK_CONTAINERS = new Set([
   'list',
@@ -97,8 +98,25 @@ export function renderContent(roots: ONode[], format: 'markdown' | 'text'): stri
     .trim();
 }
 
-/** Slices content for maxChars and offset, and says what is left. */
-export function sliceContent(content: string, offset: number, maxChars: number): { text: string; remaining: number } {
-  const text = content.slice(offset, offset + maxChars);
-  return { text, remaining: Math.max(0, content.length - offset - text.length) };
+/**
+ * Slices content for maxChars and offset, and says what is left. Never cuts a character in half: an offset that lands
+ * between the two halves of a surrogate pair (an emoji, a rare CJK character) starts after the pair's first half, and
+ * a page that would end between them ends before the pair (or, if the pair is all that fits, holds the pair whole, so
+ * paging always moves on). `start` is where the text really begins and `next` where the following page does.
+ */
+export function sliceContent(
+  content: string,
+  offset: number,
+  maxChars: number,
+): { text: string; remaining: number; start: number; next: number } {
+  let start = Math.min(Math.max(offset, 0), content.length);
+  if (isLowSurrogate(content.charCodeAt(start)) && isHighSurrogate(content.charCodeAt(start - 1))) start += 1;
+  // One character of look-ahead tells sliceWhole whether the cut falls between the halves of a pair.
+  let end = sliceWhole(content.slice(start, start + maxChars + 1), maxChars).length + start;
+  if (end === start && maxChars > 0 && start < content.length) end = Math.min(content.length, start + 2);
+  const text = content.slice(start, end);
+  return { text, remaining: Math.max(0, content.length - end), start, next: end };
 }
+
+const isHighSurrogate = (code: number) => code >= 0xd800 && code <= 0xdbff;
+const isLowSurrogate = (code: number) => code >= 0xdc00 && code <= 0xdfff;

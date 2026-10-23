@@ -131,7 +131,8 @@ describe('streamTurn', () => {
 describe('backoffMs', () => {
   it('honours Retry-After and grows exponentially with jitter otherwise', () => {
     expect(backoffMs(1, DEFAULT_RETRY, apiError(429, '', { 'retry-after': '2' }))).toBe(2000);
-    expect(backoffMs(1, DEFAULT_RETRY, apiError(429, '', { 'Retry-After': '120' }))).toBe(30_000);
+    expect(backoffMs(1, DEFAULT_RETRY, apiError(429, '', { 'retry-after': '45' }))).toBe(45_000);
+    expect(backoffMs(1, DEFAULT_RETRY, apiError(429, '', { 'Retry-After': '120' }))).toBe(120_000);
     expect(backoffMs(1, DEFAULT_RETRY, apiError(500), () => 0)).toBe(500);
     expect(backoffMs(2, DEFAULT_RETRY, apiError(500), () => 1)).toBe(2000);
   });

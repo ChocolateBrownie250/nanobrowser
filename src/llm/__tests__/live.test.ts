@@ -1,6 +1,7 @@
 // A live check of one streamed tool call per provider, run only on request:
 //   NB_LIVE=1 corepack pnpm vitest run src/llm/__tests__/live.test.ts
 // Keys come from the environment and are never written anywhere. Models can be overridden with NB_LIVE_<KIND>.
+// A provider without a key in the environment is skipped; the others still run.
 import { describe, expect, it } from 'vitest';
 import { createModel, ZAI_ANTHROPIC_BASE_URL } from '../providers';
 import type { ProviderKind } from '../providers';
@@ -48,28 +49,30 @@ const tools = {
 };
 
 describe.skipIf(!live)('live providers', () => {
-  it.each(cases)(
-    '$kind $model streams a tool call',
-    async ({ kind, model, key, baseUrl, reasoning }) => {
-      expect(key, `no key for ${kind}`).toBeTruthy();
-      let deltas = 0;
-      const result = await streamTurn({
-        chat: createModel({ kind, modelName: model, apiKey: key, baseUrl, maxOutputTokens: 512 }),
-        system: 'You operate a web page through tools. Always act with a tool call.',
-        messages: [{ role: 'user', content: 'Click the element with ref e7.' }],
-        tools,
-        ...(reasoning ? { reasoning } : {}),
-        onTextDelta: () => deltas++,
-      });
-      console.info(kind, model, result.finish, JSON.stringify(result.toolCalls), result.usage, result.error?.message);
-      expect(result.error).toBeUndefined();
-      expect(result.toolCalls[0]?.toolName).toBe('click');
-      expect(result.toolCalls[0]?.input).toEqual({ ref: 'e7' });
-      expect(result.usage?.input).toBeGreaterThan(0);
-      // OpenRouter reports cost; the others do not, and none is made up.
-      if (kind === 'openrouter') expect(result.usage?.cost).toBeGreaterThan(0);
-      else expect(result.usage?.cost).toBeUndefined();
-    },
-    60_000,
-  );
+  // it.each cannot skip one row, so each case is its own test.
+  for (const { kind, model, key, baseUrl, reasoning } of cases) {
+    it.skipIf(!key)(
+      `${kind} ${model} streams a tool call`,
+      async () => {
+        let deltas = 0;
+        const result = await streamTurn({
+          chat: createModel({ kind, modelName: model, apiKey: key, baseUrl, maxOutputTokens: 512 }),
+          system: 'You operate a web page through tools. Always act with a tool call.',
+          messages: [{ role: 'user', content: 'Click the element with ref e7.' }],
+          tools,
+          ...(reasoning ? { reasoning } : {}),
+          onTextDelta: () => deltas++,
+        });
+        console.info(kind, model, result.finish, JSON.stringify(result.toolCalls), result.usage, result.error?.message);
+        expect(result.error).toBeUndefined();
+        expect(result.toolCalls[0]?.toolName).toBe('click');
+        expect(result.toolCalls[0]?.input).toEqual({ ref: 'e7' });
+        expect(result.usage?.input).toBeGreaterThan(0);
+        // OpenRouter reports cost; the others do not, and none is made up.
+        if (kind === 'openrouter') expect(result.usage?.cost).toBeGreaterThan(0);
+        else expect(result.usage?.cost).toBeUndefined();
+      },
+      60_000,
+    );
+  }
 });

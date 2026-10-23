@@ -1,6 +1,7 @@
 // Fixture server for the browser control layer. node:http only.
 //
-// It listens on every loopback address, so the same pages answer on three sites:
+// It listens on the loopback addresses only (127.0.0.1, and [::1] where the machine has IPv6), never on another
+// interface, so the same pages answer on three sites:
 //   http://localhost:8787   the main site
 //   http://127.0.0.1:8787   a second site: frames from it are cross-site, and it plays the denied site
 //   http://[::1]:8787       a third site, for frames nested two deep across sites
@@ -33,10 +34,15 @@
 //   POST /__posthog/reset         clears them; { fail: n } makes the next n events fail
 //   GET  /__live/keys             provider keys from this process's environment, only when NB_LIVE=1 (for the
 //                                 live provider check; keys are never written to a file)
+//
+// Access (fixtures/access.mjs): a request whose Host header is not localhost, 127.0.0.1 or [::1] with the server's port
+// is refused (421). The /__ endpoints answer the extension (Origin chrome-extension://...) and clients that send no
+// Origin; a request from any other origin is refused (403) and gets no CORS header. The static pages keep `*`.
 import { createServer } from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
 import { extname, join, normalize, resolve } from 'node:path';
 import { EventEmitter } from 'node:events';
+import { judgeRequest } from './access.mjs';
 
 export const PORT = Number(process.env.FIXTURE_PORT ?? 8787);
 const PAGES = resolve(import.meta.dirname, 'pages');
@@ -83,7 +89,7 @@ function send(res, status, body, headers = {}) {
   res.writeHead(status, {
     'content-type': typeof body === 'object' && !Buffer.isBuffer(body) ? TYPES['.json'] : TYPES['.html'],
     'cache-control': 'no-store',
-    'access-control-allow-origin': '*',
+    ...(res.allowOrigin ? { 'access-control-allow-origin': res.allowOrigin, vary: 'origin' } : {}),
     ...headers,
   });
   res.end(payload);
@@ -103,8 +109,17 @@ async function serveStatic(res, path) {
 }
 
 async function handle(req, res) {
-  const url = new URL(req.url, `http://${req.headers.host}`);
+  // The host and origin rules first, before any endpoint (and any key) is reached.
+  const url = new URL(req.url, 'http://localhost');
   const path = url.pathname;
+  const verdict = judgeRequest({
+    host: req.headers.host,
+    origin: req.headers.origin,
+    path,
+    port: req.socket.localPort,
+  });
+  if (!verdict.ok) return send(res, verdict.status, { error: verdict.reason });
+  res.allowOrigin = verdict.allowOrigin;
 
   if (req.method === 'OPTIONS') return send(res, 204, '');
 
@@ -155,6 +170,7 @@ async function handle(req, res) {
         openai: env.OPENAI_API_KEY,
         gemini: env.GEMINI_API_KEY ?? env.GOOGLE_GENERATIVE_AI_API_KEY,
         openrouter: env.OPENROUTER_API_KEY,
+        zai: env.ZAI_API_KEY,
       });
     }
     return send(res, 404, { error: 'unknown endpoint' });
@@ -301,7 +317,7 @@ async function handleLlm(req, res, path) {
   res.writeHead(200, {
     'content-type': 'text/event-stream',
     'cache-control': 'no-store',
-    'access-control-allow-origin': '*',
+    ...(res.allowOrigin ? { 'access-control-allow-origin': res.allowOrigin, vary: 'origin' } : {}),
   });
   const chunk = (delta, finish = null, usage) =>
     `data: ${JSON.stringify({
@@ -350,21 +366,52 @@ function escapeHtml(s) {
   return s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
 }
 
-export function startServer(port = PORT) {
-  const server = createServer((req, res) => {
-    handle(req, res).catch(error => {
-      console.error(error);
-      if (!res.headersSent) send(res, 500, String(error));
+/** The loopback addresses the server binds. [::1] is skipped on a machine without IPv6. */
+const LOOPBACK_ADDRESSES = ['127.0.0.1', '::1'];
+
+/**
+ * Starts the server on the loopback addresses and resolves a handle `{ port, close() }`. With port 0 the system picks
+ * a free port for 127.0.0.1 and [::1] gets the same one.
+ */
+export async function startServer(port = PORT) {
+  const servers = [];
+  const close = () => Promise.all(servers.map(s => new Promise(done => s.close(() => done()))));
+  const listen = (host, at) =>
+    new Promise((resolveListen, reject) => {
+      const server = createServer((req, res) => {
+        handle(req, res).catch(error => {
+          console.error(error);
+          if (!res.headersSent) send(res, 500, String(error));
+        });
+      });
+      server.once('error', reject);
+      server.listen({ port: at, host }, () => {
+        server.off('error', reject);
+        servers.push(server);
+        resolveListen(server.address().port);
+      });
     });
-  });
-  return new Promise((resolveServer, reject) => {
-    server.once('error', reject);
-    // '::' with dual-stack answers on localhost, 127.0.0.1 and [::1].
-    server.listen({ port, host: '::', ipv6Only: false }, () => resolveServer(server));
-  });
+  try {
+    let bound;
+    for (const host of LOOPBACK_ADDRESSES) {
+      try {
+        bound = await listen(host, bound ?? port);
+      } catch (error) {
+        // No IPv6 on this machine: [::1] is simply not served.
+        if (host === '::1' && ['EADDRNOTAVAIL', 'EAFNOSUPPORT'].includes(error?.code)) continue;
+        throw error;
+      }
+    }
+    return { port: bound, close };
+  } catch (error) {
+    await close();
+    throw error;
+  }
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   await startServer();
-  console.log(`Fixture server on http://localhost:${PORT} (also http://127.0.0.1:${PORT} and http://[::1]:${PORT})`);
+  console.log(
+    `Fixture server on http://localhost:${PORT} (also http://127.0.0.1:${PORT}, and http://[::1]:${PORT} with IPv6)`,
+  );
 }

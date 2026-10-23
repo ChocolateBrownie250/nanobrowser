@@ -1,13 +1,13 @@
 // Answers as sanitised Markdown. The renderer builds React elements and never sets markup: raw HTML is dropped, only
 // http, https and mailto links survive and each shows its host, no bare address becomes a link, a remote image loads
 // only when clicked, and a link opens in an ordinary tab outside the agent's group.
-import { Children, isValidElement, useState } from 'react';
-import type { ReactNode } from 'react';
+import { Children, cloneElement, isValidElement, memo, useRef, useState } from 'react';
+import type { ReactElement, ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
-import type { Components } from 'react-markdown';
+import type { Components, Options } from 'react-markdown';
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import remarkGfm from 'remark-gfm';
-import { t } from '@src/ui/i18n';
+import { t, useLanguage } from '@src/ui/i18n';
 
 const SCHEMES = new Set(['http:', 'https:', 'mailto:']);
 
@@ -79,21 +79,27 @@ function RemoteImage({ src, alt }: { src: string; alt: string }) {
     <button
       type="button"
       className="rounded border border-dashed border-nb-border px-2 py-1 font-sans text-xs text-nb-muted hover:bg-nb-surface"
-      onClick={() => setShown(true)}>
+      onClick={e => {
+        // The reveal button is not part of a link the image may sit in: it never opens that link.
+        e.preventDefault();
+        e.stopPropagation();
+        setShown(true);
+      }}>
       {t('markdown.showImage', { host: linkHost(src) })}
       {alt ? ` · ${alt}` : ''}
     </button>
   );
 }
 
-function CopyButton({ text, label }: { text: string; label: string }) {
+/** `text` may be a function, called when Copy is clicked, so a long text is not built on every render. */
+function CopyButton({ text, label }: { text: string | (() => string); label: string }) {
   const [copied, setCopied] = useState(false);
   return (
     <button
       type="button"
       className="rounded px-1.5 py-0.5 font-sans text-xs text-nb-muted hover:bg-nb-surface"
       onClick={() => {
-        void navigator.clipboard.writeText(text).then(() => {
+        void navigator.clipboard.writeText(typeof text === 'function' ? text() : text).then(() => {
           setCopied(true);
           setTimeout(() => setCopied(false), 1500);
         });
@@ -109,14 +115,25 @@ function tableRows(node: HTMLTableElement | null): string[][] {
   return [...node.rows].map(row => [...row.cells].map(cell => cell.innerText.trim()));
 }
 
+/**
+ * A cell as CSV. One that starts with = + - @ or a tab or carriage return would be a formula when a spreadsheet opens
+ * the file, so it gets a leading apostrophe (the spreadsheet then shows it as text). A plain signed number (-3.2%,
+ * +1,5) holds nothing to evaluate and keeps its value.
+ */
+function csvCell(cell: string): string {
+  const text = /^[=+\-@\t\r]/.test(cell) && !/^[+-]\d[\d.,]*%?$/.test(cell) ? `'${cell}` : cell;
+  return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
 export function toCsv(rows: string[][]): string {
-  return rows.map(r => r.map(c => (/[",\n]/.test(c) ? `"${c.replace(/"/g, '""')}"` : c)).join(',')).join('\n');
+  return rows.map(r => r.map(csvCell).join(',')).join('\n');
 }
 
 function Table({ children }: { children?: ReactNode }) {
-  const [node, setNode] = useState<HTMLTableElement | null>(null);
+  // Read when Copy or Save is clicked: the cells' text needs a layout, which a render should not force.
+  const table = useRef<HTMLTableElement>(null);
   const save = () => {
-    const blob = new Blob([toCsv(tableRows(node))], { type: 'text/csv' });
+    const blob = new Blob([toCsv(tableRows(table.current))], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -127,15 +144,17 @@ function Table({ children }: { children?: ReactNode }) {
   return (
     <div className="my-2">
       <div className="nb-table-frame">
-        <table ref={setNode} className="nb-table">
+        <table ref={table} className="nb-table">
           {children}
         </table>
       </div>
       <div className="mt-1 flex gap-1 font-sans">
         <CopyButton
-          text={tableRows(node)
-            .map(r => r.join('\t'))
-            .join('\n')}
+          text={() =>
+            tableRows(table.current)
+              .map(r => r.join('\t'))
+              .join('\n')
+          }
           label={t('markdown.copy')}
         />
         <button
@@ -149,13 +168,47 @@ function Table({ children }: { children?: ReactNode }) {
   );
 }
 
+/** The renderer for `![alt](src)`: an address that is not allowed leaves the alt text. */
+function MdImage({ src, alt }: { src?: string; alt?: string }) {
+  const safe = typeof src === 'string' ? safeUrl(src) : '';
+  if (!safe) return <span>{alt ?? ''}</span>;
+  return <RemoteImage src={safe} alt={alt ?? ''} />;
+}
+
+/**
+ * Takes the images that can be revealed out of a link's content. A button inside an anchor is invalid HTML and a
+ * click on it would reach the link, so the images are drawn beside the link, which keeps its other content.
+ */
+function pullImages(children: ReactNode): { rest: ReactNode[]; images: ReactNode[] } {
+  const rest: ReactNode[] = [];
+  const images: ReactNode[] = [];
+  for (const child of Children.toArray(children)) {
+    if (!isValidElement<{ src?: string; children?: ReactNode }>(child)) {
+      rest.push(child);
+    } else if (child.type === MdImage && typeof child.props.src === 'string' && safeUrl(child.props.src)) {
+      images.push(child);
+    } else if (typeof child.type === 'string' && child.props.children !== undefined) {
+      // Emphasis or code around an image: look inside, and keep the element with what is left.
+      const inner = pullImages(child.props.children);
+      images.push(...inner.images);
+      rest.push(inner.images.length ? cloneElement(child as ReactElement, { children: inner.rest }) : child);
+    } else {
+      rest.push(child);
+    }
+  }
+  return { rest, images };
+}
+
 const components: Components = {
   a({ href, children }) {
     const safe = href ? safeUrl(href) : '';
     const text = textOf(children);
     if (!safe || isBareAddress(text, safe)) return <span>{children}</span>;
     const host = linkHost(safe);
-    return (
+    const { rest, images } = pullImages(children);
+    // A link that was only an image still has something to click: its address.
+    const imageOnly = images.length > 0 && !textOf(rest);
+    const link = (
       <a
         href={safe}
         rel="noopener noreferrer"
@@ -164,16 +217,19 @@ const components: Components = {
           e.preventDefault();
           openOutside(safe);
         }}>
-        {children}
-        {host && !textNamesHost(text, host) ? <span className="text-nb-muted"> ({host})</span> : null}
+        {imageOnly ? host : rest}
+        {!imageOnly && host && !textNamesHost(text, host) ? <span className="text-nb-muted"> ({host})</span> : null}
       </a>
     );
+    if (!images.length) return link;
+    return (
+      <span>
+        {images}
+        {link}
+      </span>
+    );
   },
-  img({ src, alt }) {
-    const safe = typeof src === 'string' ? safeUrl(src) : '';
-    if (!safe) return <span>{alt ?? ''}</span>;
-    return <RemoteImage src={safe} alt={alt ?? ''} />;
-  },
+  img: MdImage,
   pre({ children }) {
     const code = textOf(children);
     return (
@@ -197,17 +253,28 @@ const schema = {
   protocols: { href: ['http', 'https', 'mailto'], src: ['http', 'https'] },
 };
 
-export function Markdown({ text }: { text: string }) {
+// The plugin lists and the address filter are module constants: new ones on every render would make the renderer
+// re-parse the whole text every time.
+const REMARK_PLUGINS = [remarkGfm];
+const REHYPE_PLUGINS: NonNullable<Options['rehypePlugins']> = [[rehypeSanitize, schema]];
+const urlTransform = (url: string) => safeUrl(url);
+
+/**
+ * Memoised on its text: a settled answer is not parsed again while a later one streams. It still follows the language
+ * (the labels of its tables and images), which is not a prop.
+ */
+export const Markdown = memo(function Markdown({ text }: { text: string }) {
+  useLanguage();
   return (
     <div className="nb-markdown">
       <ReactMarkdown
         skipHtml
-        remarkPlugins={[remarkGfm]}
-        rehypePlugins={[[rehypeSanitize, schema]]}
-        urlTransform={url => safeUrl(url)}
+        remarkPlugins={REMARK_PLUGINS}
+        rehypePlugins={REHYPE_PLUGINS}
+        urlTransform={urlTransform}
         components={components}>
         {text}
       </ReactMarkdown>
     </div>
   );
-}
+});

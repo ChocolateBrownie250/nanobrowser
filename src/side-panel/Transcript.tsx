@@ -2,7 +2,7 @@
 // activity block. Under a user's message, on hover: its time, Copy, Edit and Restart from here. Under an answer,
 // always: Copy and its time. Retry after an error. A new turn keeps the question in view; auto-scroll resumes only at
 // the bottom, with a jump-to-latest arrow otherwise.
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { AttachmentRef, DisplayEntry, ToolRow } from '@src/ui/protocol';
 import { runRows } from '@src/ui/protocol';
@@ -68,12 +68,39 @@ function group(entries: DisplayEntry[]): { items: Item[]; floor: number } {
   return { items, floor };
 }
 
+const LIVE_BUSY = { waiting: false };
+const LIVE_WAITING = { waiting: true };
+
+/**
+ * The actions with a stable identity: they change only when the conversation can or cannot be acted on, or when the
+ * panel is idle or busy. The panel builds a new object on every render (every streaming update), which would make
+ * every memoised block render again; the stable one calls the latest functions.
+ */
+function useStableActions(actions: MessageActions | undefined): MessageActions | undefined {
+  const latest = useRef(actions);
+  latest.current = actions;
+  const present = !!actions;
+  const idle = actions?.idle ?? false;
+  return useMemo<MessageActions | undefined>(
+    () =>
+      present
+        ? {
+            idle,
+            edit: (entryId, text) => latest.current?.edit(entryId, text),
+            restart: entryId => latest.current?.restart(entryId),
+            retry: () => latest.current?.retry(),
+          }
+        : undefined,
+    [present, idle],
+  );
+}
+
 export function Transcript({
   entries,
   streaming,
   live,
   footer,
-  actions,
+  actions: panelActions,
 }: {
   entries: DisplayEntry[];
   streaming: { id: string; text: string } | null;
@@ -98,7 +125,9 @@ export function Transcript({
   });
 
   const now = useMinute();
-  const { items, floor } = group(entries);
+  const actions = useStableActions(panelActions);
+  // Grouped again only when the entries change, not on every streaming update, so the blocks keep their identity.
+  const { items, floor } = useMemo(() => group(entries), [entries]);
   const lastItem = items.at(-1);
   const pending = streaming && !entries.some(e => e.id === streaming.id) ? streaming : null;
   // The working run's block is the last one; before its first reply, its status line stands alone.
@@ -122,8 +151,8 @@ export function Transcript({
               <ItemView
                 item={item}
                 now={now}
-                streaming={streaming}
-                live={item === liveRun ? { waiting: !!live?.waiting } : undefined}
+                streaming={streamOf(item, streaming)}
+                live={item === liveRun ? (live?.waiting ? LIVE_WAITING : LIVE_BUSY) : undefined}
                 settled={i < settledBefore}
                 actions={actions}
                 retry={item === lastItem && item.kind === 'notice' && item.tone === 'error'}
@@ -221,7 +250,12 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
-function ItemView({
+/** The streaming reply, for the block that owns it; the others get none, so a streaming update leaves them as they are. */
+function streamOf(item: Item, streaming: { id: string; text: string } | null) {
+  return streaming && item.kind === 'run' && item.replies.some(r => r.id === streaming.id) ? streaming : null;
+}
+
+const ItemView = memo(function ItemView({
   item,
   now,
   streaming,
@@ -239,6 +273,7 @@ function ItemView({
   actions?: MessageActions;
   retry: boolean;
 }) {
+  useLanguage();
   if (item.kind === 'user')
     return (
       <UserMessage
@@ -271,7 +306,7 @@ function ItemView({
   }
   if (item.kind === 'download') return <SavedFile name={item.name} downloadId={item.downloadId} bytes={item.bytes} />;
   return <RunView item={item} now={now} streaming={streaming} live={live} settled={settled} />;
-}
+});
 
 /**
  * A notice is stored in English, as the worker wrote it; one that has a `notice.*` string in the catalogue is shown in
@@ -402,7 +437,7 @@ function UserMessage({
   );
 }
 
-function RunView({
+const RunView = memo(function RunView({
   item,
   now,
   streaming,
@@ -415,6 +450,7 @@ function RunView({
   live?: { waiting: boolean };
   settled: boolean;
 }) {
+  useLanguage();
   const { replies, opened, start } = item;
   const rows: ToolRow[] = runRows(
     replies.flatMap(r => r.tools),
@@ -455,4 +491,4 @@ function RunView({
       ) : null}
     </div>
   );
-}
+});

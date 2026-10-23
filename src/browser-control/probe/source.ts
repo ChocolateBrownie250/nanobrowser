@@ -24,6 +24,8 @@ export interface ProbeState {
   autocomplete: string;
   name: string;
   id: string;
+  /** The placeholder attribute, for masking decisions in core (it can name a secret field). */
+  placeholder: string;
   /** A native select: whether several options can be selected. */
   multiple: boolean;
   /** The element has focus (through shadow roots). */
@@ -93,6 +95,8 @@ export interface SelectedOption {
   index: number;
   value: string;
   label: string;
+  /** The option's visible text, when it differs from the label (a `label` attribute): both are judged by the gate. */
+  text?: string;
 }
 
 export interface HitVerdict {
@@ -105,7 +109,8 @@ export interface HitVerdict {
 
 export interface GuardReport {
   /** none: no press reached this document; passed: the press hit the target; cancelled: it did not, and the
-   *  sequence was cancelled before any page handler ran. */
+   *  sequence was cancelled by the guard (target and bubbling handlers did not run; a page capture listener on the
+   *  window that was registered earlier may have seen the event). */
   verdict: 'none' | 'passed' | 'cancelled';
   /** What was at the press point, when the guard cancelled. */
   hit: string;
@@ -167,6 +172,7 @@ export interface ProbeApi {
   disarm(): void;
   scrollInfo(el: Element | null): ScrollInfo;
   viewport(): { width: number; height: number };
+  matchOptions(el: Element, values: string[]): OptionResult;
   selectOption(el: Element, values: string[]): OptionResult;
   selectedOptions(el: Element): SelectedOption[];
   selectContents(el: Element): boolean;
@@ -187,6 +193,7 @@ export interface ProbeApi {
   setNativeValue(el: Element, value: string): string;
   fileInputFacts(el: Element): FileInputFacts;
   fileChunk(el: Element, key: string, chunk: string): number;
+  dropFiles(el: Element, keys: string[]): number;
   setFiles(el: Element, specs: Array<{ key: string; name: string; mimeType: string }>): FileInfo[];
   fileList(el: Element): FileInfo[];
 }
@@ -220,27 +227,76 @@ export function probeMain(): void {
     // A document without a root yet; counting starts with the next document.
   }
 
+  // A form's named controls shadow the form's own properties and methods (`form.closest`, `form.parentNode`,
+  // `form.id`, `form.getAttribute` and the rest are then the control of that name), and LegacyOverrideBuiltIns lets
+  // them win over the prototype. Every member read on a node that may be a form (an ancestor, a hit, a container, a
+  // block) goes through these helpers, which take the member from the prototype of this world, which the page cannot
+  // change. Calling `form.closest(...)` directly throws, or, for `parentNode`, loops for ever.
+  const nodeProp = (n: Node, name: 'parentNode' | 'nodeType' | 'nodeName' | 'isConnected' | 'parentElement'): any =>
+    Object.getOwnPropertyDescriptor(Node.prototype, name)!.get!.call(n);
+  const elemProp = (e: Element, name: 'tagName' | 'id' | 'className'): any =>
+    Object.getOwnPropertyDescriptor(Element.prototype, name)!.get!.call(e);
+  const htmlProp = (e: Element, name: 'inert' | 'innerText' | 'isContentEditable'): any =>
+    e instanceof HTMLElement ? Object.getOwnPropertyDescriptor(HTMLElement.prototype, name)!.get!.call(e) : undefined;
+  const elemCall = (
+    e: Element,
+    name: 'getAttribute' | 'hasAttribute' | 'closest' | 'matches' | 'getClientRects' | 'checkVisibility',
+    ...args: any[]
+  ): any => (Element.prototype as any)[name].apply(e, args);
+  const rootOf = (n: Node): Node => Node.prototype.getRootNode.call(n);
+  const attrOf = (e: Element, name: string): string | null => elemCall(e, 'getAttribute', name);
+  // `text.slice(0, end)` that never ends between the two halves of a surrogate pair (the same rule as sliceWhole in
+  // core/text.ts, which the probe cannot import).
+  const sliceWhole = (text: string, end: number): string => {
+    let at = Math.min(Math.max(end, 0), text.length);
+    if (at > 0 && at < text.length) {
+      const before = text.charCodeAt(at - 1);
+      const after = text.charCodeAt(at);
+      if (before >= 0xd800 && before <= 0xdbff && after >= 0xdc00 && after <= 0xdfff) at -= 1;
+    }
+    return text.slice(0, at);
+  };
+  // A control that is activated, not typed into, whatever editing region it sits in (every descendant of one reports
+  // `isContentEditable`) and whatever else its role says: a button, a link, a summary, a select, or an element with one
+  // of those roles. The same list as keys.ts (CONTROL_TAGS, CONTROL_ROLES); the probe cannot import it.
+  const CONTROL_ROLE_LIST = [
+    'button',
+    'link',
+    'checkbox',
+    'radio',
+    'switch',
+    'menuitem',
+    'menuitemcheckbox',
+    'menuitemradio',
+    'tab',
+    'option',
+    'treeitem',
+  ];
+  const isControlEl = (e: Element): boolean =>
+    ['button', 'a', 'area', 'summary', 'select'].includes((elemProp(e, 'tagName') as string).toLowerCase()) ||
+    CONTROL_ROLE_LIST.includes((attrOf(e, 'role') ?? '').trim().toLowerCase());
+
   const disabledByAncestor = (el: Element): boolean => {
     for (let node: Element | null = el; node;) {
-      if ((node as HTMLElement).inert) return true;
-      if (node.getAttribute('aria-disabled') === 'true') return true;
+      if (htmlProp(node, 'inert')) return true;
+      if (attrOf(node, 'aria-disabled') === 'true') return true;
       // A disabled fieldset disables its controls, except those in its first legend.
-      if (node.tagName === 'FIELDSET' && node !== el) {
+      if (elemProp(node, 'tagName') === 'FIELDSET' && node !== el) {
         if ((node as HTMLFieldSetElement).disabled) {
           const legend = node.querySelector(':scope > legend');
           if (!legend || !legend.contains(el)) return true;
         }
       } else if ((node as any).disabled === true && 'disabled' in node) return true;
-      const parent: Node | null = node.parentNode;
+      const parent: Node | null = nodeProp(node, 'parentNode');
       node = parent instanceof ShadowRoot ? parent.host : (parent as Element | null);
-      if (node && node.nodeType !== 1) node = null;
+      if (node && nodeProp(node, 'nodeType') !== 1) node = null;
     }
     return false;
   };
 
   /** Parent in the composed tree: a shadow root's host, otherwise the parent node. */
   const composedParent = (n: Node): Node | null => {
-    const p = n.parentNode;
+    const p: Node | null = nodeProp(n, 'parentNode');
     return p instanceof ShadowRoot ? p.host : p;
   };
   const INTERACTIVE =
@@ -258,20 +314,20 @@ export function probeMain(): void {
    */
   const formProp = <K extends 'action' | 'method' | 'target' | 'elements'>(form: HTMLFormElement, name: K) =>
     Object.getOwnPropertyDescriptor(HTMLFormElement.prototype, name)!.get!.call(form) as HTMLFormElement[K];
-  const formAttr = (form: HTMLFormElement, name: string) => Element.prototype.getAttribute.call(form, name);
+  const formAttr = (form: HTMLFormElement, name: string) => attrOf(form, name);
   /** Fields that block implicit submission in Chrome when a form has no submit button (dates and times do not). */
   const BLOCKING = ['text', 'search', 'url', 'tel', 'email', 'password', 'number'];
   const isTextField = (e: Element) =>
-    e.tagName === 'INPUT' && BLOCKING.includes((e as HTMLInputElement).type || 'text');
+    elemProp(e, 'tagName') === 'INPUT' && BLOCKING.includes((e as HTMLInputElement).type || 'text');
   const isSubmitterEl = (e: Element) =>
-    (e.tagName === 'BUTTON' && ((e as HTMLButtonElement).type || 'submit') === 'submit') ||
-    (e.tagName === 'INPUT' && ['submit', 'image'].includes((e as HTMLInputElement).type));
+    (elemProp(e, 'tagName') === 'BUTTON' && ((e as HTMLButtonElement).type || 'submit') === 'submit') ||
+    (elemProp(e, 'tagName') === 'INPUT' && ['submit', 'image'].includes((e as HTMLInputElement).type));
   /**
    * A form's submit buttons in tree order. `form.elements` leaves out image buttons, which are submit buttons too
    * (and can be the default button), so they are added from the form's tree.
    */
   const submittersOf = (owner: HTMLFormElement): Element[] => {
-    const root = owner.getRootNode() as Document | ShadowRoot;
+    const root = rootOf(owner) as Document | ShadowRoot;
     const images = [...root.querySelectorAll('input[type=image]')].filter(i => (i as HTMLInputElement).form === owner);
     const all = [...new Set([...(formProp(owner, 'elements') as unknown as Element[]), ...images])].filter(
       isSubmitterEl,
@@ -299,28 +355,28 @@ export function probeMain(): void {
    * An element's rendered text for messages and evidence, whitespace collapsed, without the content of selects,
    * textareas and options, as the layout's display text. Stops once it has more than `max` characters.
    */
-  const unquoted = (el: Element) => UNQUOTED.has(el.tagName) || el.getAttribute('role') === 'option';
+  const unquoted = (el: Element) => UNQUOTED.has(elemProp(el, 'tagName')) || attrOf(el, 'role') === 'option';
   const shownText = (el: Element, max: number): string => {
     if (unquoted(el)) return '';
     const walker = document.createTreeWalker(el, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
       acceptNode: n =>
-        n.nodeType !== Node.ELEMENT_NODE
+        nodeProp(n, 'nodeType') !== Node.ELEMENT_NODE
           ? NodeFilter.FILTER_ACCEPT
-          : unquoted(n as Element) || (n as Element).checkVisibility?.() === false
+          : unquoted(n as Element) || elemCall(n as Element, 'checkVisibility') === false
             ? NodeFilter.FILTER_REJECT
             : NodeFilter.FILTER_SKIP,
     });
     let out = '';
     for (let n = walker.nextNode(); n && out.length <= max * 2; n = walker.nextNode()) out += ` ${n.nodeValue ?? ''}`;
     out = out.replace(/\s+/g, ' ').trim();
-    return out.length > max ? `${out.slice(0, max - 1)}…` : out;
+    return out.length > max ? `${sliceWhole(out, max - 1)}…` : out;
   };
 
   /** A control that holds a value: a text-like input, a textarea or a select (a button's value is its caption). */
   const holdsValue = (e: Element) =>
-    e.tagName === 'TEXTAREA' ||
-    e.tagName === 'SELECT' ||
-    (e.tagName === 'INPUT' &&
+    elemProp(e, 'tagName') === 'TEXTAREA' ||
+    elemProp(e, 'tagName') === 'SELECT' ||
+    (elemProp(e, 'tagName') === 'INPUT' &&
       !['checkbox', 'radio', 'button', 'submit', 'reset', 'image'].includes((e as HTMLInputElement).type));
 
   /**
@@ -329,12 +385,12 @@ export function probeMain(): void {
    */
   const nameOf = (e: Element) =>
     (
-      e.getAttribute('aria-label') ||
+      attrOf(e, 'aria-label') ||
       (holdsValue(e)
         ? [...((e as HTMLInputElement).labels ?? [])].map(l => shownText(l, 100)).join(' ')
-        : (e as HTMLElement).innerText || (e as HTMLInputElement).value) ||
-      e.getAttribute('alt') ||
-      e.getAttribute('title') ||
+        : htmlProp(e, 'innerText') || (e as HTMLInputElement).value) ||
+      attrOf(e, 'alt') ||
+      attrOf(e, 'title') ||
       ''
     ).trim();
 
@@ -363,7 +419,7 @@ export function probeMain(): void {
   /** Shadow roots from the document down to the target's own root, so closed roots can be entered. */
   const rootsOf = (el: Element): ShadowRoot[] => {
     const roots: ShadowRoot[] = [];
-    for (let root = el.getRootNode(); root instanceof ShadowRoot; root = root.host.getRootNode()) roots.unshift(root);
+    for (let root = rootOf(el); root instanceof ShadowRoot; root = rootOf(root.host)) roots.unshift(root);
     return roots;
   };
   /** The element at a point, descending through the target's chain of shadow hosts (closed ones included). */
@@ -412,6 +468,38 @@ export function probeMain(): void {
     if (report.seen.length < 100) report.seen.push(type);
   };
 
+  /** The options a request matches in a select, by value, then label, then normalized text, with the elements. */
+  const matchIn = (
+    select: HTMLSelectElement,
+    values: string[],
+  ): { result: OptionResult; picked: HTMLOptionElement[] } => {
+    const options = [...select.options];
+    const norm = (t: string) => t.replace(/\s+/g, ' ').trim().toLowerCase();
+    const listing = options.map(o => ({ index: o.index, value: o.value, label: o.label }));
+    const fail = (error: 'NO_SUCH_OPTION' | 'AMBIGUOUS_OPTION', problem: string) => ({
+      result: { ok: false, error, options: listing, selected: [], problem },
+      picked: [] as HTMLOptionElement[],
+    });
+    const picked: HTMLOptionElement[] = [];
+    for (const value of values) {
+      let matches = options.filter(o => o.value === value);
+      if (!matches.length) matches = options.filter(o => o.label === value);
+      if (!matches.length) matches = options.filter(o => norm(o.text) === norm(value));
+      if (!matches.length) return fail('NO_SUCH_OPTION', value);
+      if (matches.length > 1) return fail('AMBIGUOUS_OPTION', value);
+      picked.push(matches[0]);
+    }
+    if (!select.multiple && picked.length > 1) return fail('AMBIGUOUS_OPTION', values.join(', '));
+    // What was asked for is read before the events: a change handler may rewrite the option itself.
+    const requested = picked.map(o => ({
+      index: o.index,
+      value: o.value,
+      label: o.label,
+      ...(o.text !== o.label ? { text: o.text } : {}),
+    }));
+    return { result: { ok: true, options: listing, selected: [], requested }, picked };
+  };
+
   let blockCount = 0;
   let blockObserver: MutationObserver | null = null;
   const BLOCKS =
@@ -421,7 +509,7 @@ export function probeMain(): void {
     version: 1,
 
     state(el: Element) {
-      const tag = el.tagName.toLowerCase();
+      const tag = (elemProp(el, 'tagName') as string).toLowerCase();
       const input = el as HTMLInputElement;
       const type = tag === 'input' ? (input.type || 'text').toLowerCase() : '';
       const textInput =
@@ -430,46 +518,48 @@ export function probeMain(): void {
           !['checkbox', 'radio', 'button', 'submit', 'reset', 'image', 'file', 'hidden', 'range', 'color'].includes(
             type,
           ));
-      const contentEditable = (el as HTMLElement).isContentEditable === true;
+      const contentEditable = htmlProp(el, 'isContentEditable') === true;
       const enabled = !disabledByAncestor(el);
-      const readOnly = textInput && (input.readOnly || el.getAttribute('aria-readonly') === 'true');
-      const editable = enabled && ((textInput && !readOnly) || contentEditable);
+      const readOnly = textInput && (input.readOnly || attrOf(el, 'aria-readonly') === 'true');
+      // A button or link inside an editing region reports contentEditable, but it is a control, not a place to type.
+      const editable = enabled && ((textInput && !readOnly) || (contentEditable && !isControlEl(el)));
       let checked: boolean | 'mixed' | null = null;
       if (tag === 'input' && (type === 'checkbox' || type === 'radio'))
         checked = input.indeterminate ? 'mixed' : input.checked;
-      else if (el.hasAttribute('aria-checked')) {
-        const a = el.getAttribute('aria-checked');
+      else if (elemCall(el, 'hasAttribute', 'aria-checked')) {
+        const a = attrOf(el, 'aria-checked');
         checked = a === 'mixed' ? 'mixed' : a === 'true';
       }
       let value: string | null = null;
       if (tag === 'input' || tag === 'textarea' || tag === 'select') value = (el as HTMLInputElement).value;
-      else if (contentEditable) value = (el as HTMLElement).innerText;
+      else if (contentEditable) value = htmlProp(el, 'innerText');
       // visibility: hidden counts as not visible; opacity 0 does not (Playwright's rule).
       const visible =
-        typeof (el as any).checkVisibility === 'function'
-          ? (el as any).checkVisibility({ visibilityProperty: true, checkVisibilityCSS: true })
+        typeof Element.prototype.checkVisibility === 'function'
+          ? elemCall(el, 'checkVisibility', { visibilityProperty: true, checkVisibilityCSS: true })
           : true;
       return {
-        connected: el.isConnected,
+        connected: nodeProp(el, 'isConnected'),
         tag,
         type,
-        role: el.getAttribute('role') ?? '',
+        role: attrOf(el, 'role') ?? '',
         visible,
         enabled,
         editable,
         contentEditable,
         checked,
         value,
-        inShadow: el.getRootNode() instanceof ShadowRoot,
-        autocomplete: (el.getAttribute('autocomplete') ?? '').toLowerCase(),
-        name: el.getAttribute('name') ?? '',
-        id: el.id,
+        inShadow: rootOf(el) instanceof ShadowRoot,
+        autocomplete: (attrOf(el, 'autocomplete') ?? '').toLowerCase(),
+        name: attrOf(el, 'name') ?? '',
+        id: elemProp(el, 'id'),
+        placeholder: attrOf(el, 'placeholder') ?? '',
         multiple: tag === 'select' && (el as HTMLSelectElement).multiple,
         focused: (() => {
           let a: Element | null = document.activeElement;
           while (a && a.shadowRoot && a.shadowRoot.activeElement) a = a.shadowRoot.activeElement;
           // Closed roots hide their active element from shadowRoot; compare through the target's own root too.
-          const own = el.getRootNode() as Document | ShadowRoot;
+          const own = rootOf(el) as Document | ShadowRoot;
           return a === el || own.activeElement === el;
         })(),
       };
@@ -477,45 +567,25 @@ export function probeMain(): void {
 
     /**
      * A native select: each requested value matches an option by value, then by label, then by normalized text. None is
-     * NO_SUCH_OPTION, several is AMBIGUOUS_OPTION; both list the options and change nothing. Otherwise the options are
-     * selected and input and change are dispatched.
+     * NO_SUCH_OPTION, several is AMBIGUOUS_OPTION; both list the options. Nothing is changed: the controller judges the
+     * matched options (`requested`, with their labels and visible text) before anything is selected.
      */
-    selectOption(el: Element, values: string[]) {
+    matchOptions(el: Element, values: string[]): OptionResult {
+      return matchIn(el as HTMLSelectElement, values).result;
+    },
+
+    /**
+     * Matches the options as `matchOptions` does; none or several is the same error and changes nothing. Otherwise the
+     * options are selected and input and change are dispatched.
+     */
+    selectOption(el: Element, values: string[]): OptionResult {
       const select = el as HTMLSelectElement;
-      const options = [...select.options];
-      const norm = (t: string) => t.replace(/\s+/g, ' ').trim().toLowerCase();
-      const listing = options.map(o => ({ index: o.index, value: o.value, label: o.label }));
-      const picked: HTMLOptionElement[] = [];
-      for (const value of values) {
-        let matches = options.filter(o => o.value === value);
-        if (!matches.length) matches = options.filter(o => o.label === value);
-        if (!matches.length) matches = options.filter(o => norm(o.text) === norm(value));
-        if (!matches.length)
-          return { ok: false, error: 'NO_SUCH_OPTION' as const, options: listing, selected: [], problem: value };
-        if (matches.length > 1)
-          return { ok: false, error: 'AMBIGUOUS_OPTION' as const, options: listing, selected: [], problem: value };
-        picked.push(matches[0]);
-      }
-      if (!select.multiple && picked.length > 1) {
-        return {
-          ok: false,
-          error: 'AMBIGUOUS_OPTION' as const,
-          options: listing,
-          selected: [],
-          problem: values.join(', '),
-        };
-      }
-      // What was asked for is read before the events: a change handler may rewrite the option itself.
-      const requested = picked.map(o => ({ index: o.index, value: o.value, label: o.label }));
-      for (const o of options) o.selected = picked.includes(o);
+      const { result, picked } = matchIn(select, values);
+      if (!result.ok) return result;
+      for (const o of select.options) o.selected = picked.includes(o);
       select.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
       select.dispatchEvent(new Event('change', { bubbles: true }));
-      return {
-        ok: true,
-        options: listing,
-        selected: [...select.selectedOptions].map(o => o.label),
-        requested,
-      };
+      return { ...result, selected: [...select.selectedOptions].map(o => o.label) };
     },
 
     /** Whether the element is a file input, and what it takes. */
@@ -538,24 +608,36 @@ export function probeMain(): void {
       return chunks.reduce((n, c) => n + c.length, 0);
     },
 
+    /** Forgets the chunks held under these keys (a call that failed before its files were built); how many were held. */
+    dropFiles(_el: Element, keys: string[]) {
+      let held = 0;
+      for (const key of keys) if (fileChunks.delete(key)) held++;
+      return held;
+    },
+
     /**
      * Builds the files from their chunks, puts them in the input through a DataTransfer and dispatches input and
-     * change, as a user's choice would. Returns what the input then holds.
+     * change, as a user's choice would. Returns what the input then holds. The chunks of these keys are gone when it
+     * returns, whether the files could be built or not.
      */
     setFiles(el: Element, specs: Array<{ key: string; name: string; mimeType: string }>) {
       const input = el as HTMLInputElement;
-      const transfer = new DataTransfer();
-      for (const spec of specs) {
-        const binary = atob((fileChunks.get(spec.key) ?? []).join(''));
-        fileChunks.delete(spec.key);
-        const bytes = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-        transfer.items.add(new File([bytes], spec.name, { type: spec.mimeType }));
+      try {
+        const transfer = new DataTransfer();
+        for (const spec of specs) {
+          const binary = atob((fileChunks.get(spec.key) ?? []).join(''));
+          fileChunks.delete(spec.key);
+          const bytes = new Uint8Array(binary.length);
+          for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+          transfer.items.add(new File([bytes], spec.name, { type: spec.mimeType }));
+        }
+        input.files = transfer.files;
+        input.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        return [...(input.files ?? [])].map(f => ({ name: f.name, size: f.size, type: f.type }));
+      } finally {
+        for (const spec of specs) fileChunks.delete(spec.key);
       }
-      input.files = transfer.files;
-      input.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
-      input.dispatchEvent(new Event('change', { bubbles: true }));
-      return [...(input.files ?? [])].map(f => ({ name: f.name, size: f.size, type: f.type }));
     },
 
     /** The files a file input holds, for the read-back. */
@@ -576,9 +658,9 @@ export function probeMain(): void {
     watchBlock(el: Element) {
       blockObserver?.disconnect();
       blockCount = 0;
-      let block: Element | null = el.closest(BLOCKS);
+      let block: Element | null = elemCall(el, 'closest', BLOCKS);
       if (!block) {
-        const root = el.getRootNode();
+        const root = rootOf(el);
         block = root instanceof ShadowRoot ? root.host : document.body;
       }
       blockObserver = new MutationObserver(records => {
@@ -602,10 +684,13 @@ export function probeMain(): void {
      * navigate), the formaction of a submit button with a form owner, or, for Enter in a field, its form's action.
      */
     navigationTarget(el: Element, mode: 'activate' | 'enter') {
-      for (let n: Node | null = el; n; n = composedParent(n)) {
-        if (n.nodeType !== 1) continue;
+      // A cap on the climb, so that a tree that never ends cannot hold the renderer.
+      let climbed = 0;
+      for (let n: Node | null = el; n && climbed < 10000; n = composedParent(n), climbed++) {
+        if (nodeProp(n, 'nodeType') !== 1) continue;
         const e = n as HTMLAnchorElement;
-        if ((e.tagName === 'A' || e.tagName === 'AREA') && e.hasAttribute('href')) {
+        const eTag = elemProp(e, 'tagName');
+        if ((eTag === 'A' || eTag === 'AREA') && elemCall(e, 'hasAttribute', 'href')) {
           const url = e.href;
           if (url.toLowerCase().startsWith('javascript:')) return null;
           return { kind: 'link' as const, url, method: 'GET', newTab: !!e.target && e.target !== '_self' };
@@ -642,12 +727,11 @@ export function probeMain(): void {
 
     /** Facts the confirmation gate's classifier needs about the element and its form owner. */
     formFacts(el: Element) {
-      const tag = el.tagName.toLowerCase();
+      const tag = (elemProp(el, 'tagName') as string).toLowerCase();
       const type = ((el as HTMLInputElement).type ?? '').toLowerCase();
-      const testIds = ['data-testid', 'data-test', 'data-qa', 'data-test-id']
-        .map(a => el.getAttribute(a) ?? '')
-        .join(' ');
-      const classes = `${typeof el.className === 'string' ? el.className : ''} ${testIds} ${el.id}`.trim();
+      const testIds = ['data-testid', 'data-test', 'data-qa', 'data-test-id'].map(a => attrOf(el, a) ?? '').join(' ');
+      const className = elemProp(el, 'className');
+      const classes = `${typeof className === 'string' ? className : ''} ${testIds} ${elemProp(el, 'id')}`.trim();
       const DATES = ['date', 'month', 'week', 'time', 'datetime-local'];
       const owner = (el as any).form as HTMLFormElement | null | undefined;
       const field = (tag === 'input' && [...BLOCKING, ...DATES].includes(type || 'text')) || tag === 'select';
@@ -656,7 +740,7 @@ export function probeMain(): void {
         const elements = [...formProp(owner, 'elements')] as Element[];
         const fieldEls = elements.filter(
           e =>
-            ['INPUT', 'SELECT', 'TEXTAREA'].includes(e.tagName) &&
+            ['INPUT', 'SELECT', 'TEXTAREA'].includes(elemProp(e, 'tagName')) &&
             !['hidden', 'submit', 'image', 'button', 'reset'].includes((e as HTMLInputElement).type),
         );
         const blocking = elements.filter(isTextField);
@@ -670,10 +754,10 @@ export function probeMain(): void {
         const action = via?.hasAttribute('formaction') ? via.formAction : formProp(owner, 'action');
         const search =
           formAttr(owner, 'role') === 'search' ||
-          !!owner.closest('[role=search], search') ||
-          elements.some(e => e.tagName === 'INPUT' && (e as HTMLInputElement).type === 'search') ||
+          !!elemCall(owner, 'closest', '[role=search], search') ||
+          elements.some(e => elemProp(e, 'tagName') === 'INPUT' && (e as HTMLInputElement).type === 'search') ||
           // A single-field GET form is a search form, unless its one field is a textarea (a message, not a query).
-          (method === 'get' && fieldEls.length === 1 && fieldEls[0].tagName !== 'TEXTAREA');
+          (method === 'get' && fieldEls.length === 1 && elemProp(fieldEls[0], 'tagName') !== 'TEXTAREA');
         form = {
           method,
           action,
@@ -695,31 +779,33 @@ export function probeMain(): void {
       };
       let money = '';
       // Only the element and its parent: a wider container picks up amounts that belong to something else.
-      for (const box of [el, el.parentElement]) {
-        if (!money && box) money = findMoney(((box as HTMLElement).innerText ?? '').trim());
+      for (const box of [el, nodeProp(el, 'parentElement') as Element | null]) {
+        if (!money && box) money = findMoney((htmlProp(box, 'innerText') ?? '').trim());
       }
-      const html = el as HTMLElement;
+      const role = (attrOf(el, 'role') ?? '').trim().toLowerCase();
+      // A place to type: a text field, an editing region (a control inside one inherits that and is not a place to
+      // type), or an element that says it is a text box or search box.
+      const control = isControlEl(el);
       const textEntry =
         tag === 'textarea' ||
-        html.isContentEditable === true ||
-        (tag === 'input' && [...BLOCKING, ''].includes(type) && type !== 'password');
-      const role = (el.getAttribute('role') ?? '').toLowerCase();
-      const words = [el.getAttribute('name'), el.getAttribute('placeholder'), el.getAttribute('aria-label'), el.id]
+        (tag === 'input' && [...BLOCKING, ''].includes(type) && type !== 'password') ||
+        (!control && (htmlProp(el, 'isContentEditable') === true || role === 'textbox' || role === 'searchbox'));
+      const words = [attrOf(el, 'name'), attrOf(el, 'placeholder'), attrOf(el, 'aria-label'), elemProp(el, 'id')]
         .filter(Boolean)
         .join(' ');
       const searchField =
         type === 'search' ||
         role === 'searchbox' ||
         role === 'combobox' ||
-        !!el.closest('[role=search], search') ||
-        /\b(search|query|find|lookup)\b|^q$|搜索|查找|検索/i.test(words);
+        !!elemCall(el, 'closest', '[role=search], search') ||
+        /\b(search|query|find|lookup)\b|^q$|搜索|搜尋|搜寻|查找|尋找|寻找|查詢|查询|検索/i.test(words);
       return {
         tag,
         type,
         classes,
         textEntry,
         searchField,
-        isLink: !!el.closest('a[href], area[href]'),
+        isLink: !!elemCall(el, 'closest', 'a[href], area[href]'),
         submitter: isSubmitterEl(el) && !!owner,
         field,
         form,
@@ -754,7 +840,7 @@ export function probeMain(): void {
     /** Alert and live-region text, validation messages and open dialogs or modal layers (evidence version 2). */
     pageFacts() {
       const text = (el: Element) => shownText(el, 120);
-      const visible = (el: Element) => (el as HTMLElement).getClientRects().length > 0;
+      const visible = (el: Element) => elemCall(el, 'getClientRects').length > 0;
       const alerts = [
         ...document.querySelectorAll('[role=alert], [role=status], [aria-live=assertive], [aria-live=polite], output'),
       ]
@@ -762,7 +848,12 @@ export function probeMain(): void {
         .map(text)
         .filter(Boolean);
       const invalid = [...document.querySelectorAll(':invalid')]
-        .filter(el => 'validationMessage' in el && (el as HTMLInputElement).validationMessage && el.tagName !== 'FORM')
+        .filter(
+          el =>
+            'validationMessage' in el &&
+            (el as HTMLInputElement).validationMessage &&
+            elemProp(el, 'tagName') !== 'FORM',
+        )
         .map(el => (el as HTMLInputElement).validationMessage);
       const layers = [
         ...document.querySelectorAll('dialog[open], [role=dialog], [role=alertdialog], [aria-modal=true]'),
@@ -770,7 +861,7 @@ export function probeMain(): void {
         .filter(visible)
         .map(
           el =>
-            `${el.getAttribute('role') ?? el.tagName.toLowerCase()} "${el.getAttribute('aria-label') ?? shownText(el, 60)}"`,
+            `${attrOf(el, 'role') ?? (elemProp(el, 'tagName') as string).toLowerCase()} "${attrOf(el, 'aria-label') ?? shownText(el, 60)}"`,
         );
       return { alerts, invalid, layers };
     },
@@ -811,7 +902,7 @@ export function probeMain(): void {
 
     /** Selects the whole content of a focused field or editor, so the next insertion replaces it. */
     selectContents(el: Element) {
-      const tag = el.tagName;
+      const tag = elemProp(el, 'tagName');
       if (tag === 'INPUT' || tag === 'TEXTAREA') {
         try {
           (el as HTMLInputElement).select();
@@ -820,7 +911,7 @@ export function probeMain(): void {
           return false;
         }
       }
-      const selection = (el.getRootNode() as Document).getSelection?.() ?? document.getSelection();
+      const selection = (rootOf(el) as Document).getSelection?.() ?? document.getSelection();
       if (!selection) return false;
       const range = document.createRange();
       range.selectNodeContents(el);
@@ -852,7 +943,7 @@ export function probeMain(): void {
       // same steps as the capture's digest (`digestOf` in layout.ts), so indentation cannot make the two differ.
       for (let n = walker.nextNode(); n && out.length <= max; n = walker.nextNode())
         out = (out + (n.nodeValue ?? '')).replace(/\s+/g, ' ').trimStart();
-      return out.trim().slice(0, max);
+      return sliceWhole(out.trim(), max);
     },
 
     /**
@@ -861,8 +952,8 @@ export function probeMain(): void {
      * (`nameSources` in layout.ts); fields separated by U+001F.
      */
     nameSources(el: Element) {
-      const attrs = ['aria-label', 'aria-labelledby', 'title'].map(a => el.getAttribute(a) ?? '');
-      const labelled = ['INPUT', 'SELECT', 'TEXTAREA'].includes(el.tagName)
+      const attrs = ['aria-label', 'aria-labelledby', 'title'].map(a => attrOf(el, a) ?? '');
+      const labelled = ['INPUT', 'SELECT', 'TEXTAREA'].includes(elemProp(el, 'tagName'))
         ? [...((el as HTMLInputElement).labels ?? [])].map(l => api.textDigest(l)).sort()
         : [];
       return [...attrs, ...labelled].join('\u001f');
@@ -881,21 +972,21 @@ export function probeMain(): void {
         if (n === target) {
           return nested ? { accepted: false, kind: 'nested' as const } : { accepted: true, kind: 'inside' as const };
         }
-        if (n.nodeType === 1) {
+        if (nodeProp(n, 'nodeType') === 1) {
           const el = n as Element;
-          if (!nested && el.matches(NESTED_CONTROL) && !(el as HTMLElement).isContentEditable) nested = el;
+          if (!nested && elemCall(el, 'matches', NESTED_CONTROL) && !htmlProp(el, 'isContentEditable')) nested = el;
         }
-        if (n.parentNode instanceof ShadowRoot) nested = null;
+        if (nodeProp(n, 'parentNode') instanceof ShadowRoot) nested = null;
       }
       // A label whose control is the target activates it, unless the hit is on interactive content in the label.
       for (let n: Node | null = hit; n; n = composedParent(n)) {
-        if (n.nodeType !== 1) continue;
+        if (nodeProp(n, 'nodeType') !== 1) continue;
         const el = n as Element;
-        if (el.tagName === 'LABEL') {
+        if (elemProp(el, 'tagName') === 'LABEL') {
           if ((el as HTMLLabelElement).control === target) return { accepted: true, kind: 'label' as const };
           break;
         }
-        if (el.matches(INTERACTIVE)) break;
+        if (elemCall(el, 'matches', INTERACTIVE)) break;
       }
       for (let n: Node | null = target; n; n = composedParent(n)) {
         if (n === hit) return { accepted: false, kind: 'ancestor' as const };
@@ -905,8 +996,10 @@ export function probeMain(): void {
 
     /**
      * The dispatch-time guard. Listens on the window in the capture phase; when the trusted press arrives it re-applies
-     * the hit rule at the event's coordinates. A failed check cancels the press and every later event of the sequence,
-     * so no page handler runs and no default action happens.
+     * the hit rule at the event's coordinates. A failed check cancels the press and every later event of the sequence:
+     * no default action happens and no handler at or below the window's capture phase runs. A page script that
+     * registered its own capture listener on the window before the guard (the layer cannot run before the page's own
+     * scripts) may already have seen that one event; the layer reports it that way, as delivery unknown.
      * In text mode it checks that every key and insertion of the sequence goes to the target, since a page handler
      * can move focus between two keys. Keys go to the element that has focus, so only the target itself is accepted:
      * a control inside it (a button in an editor) is another element, which nothing classified.
@@ -996,7 +1089,8 @@ export function probeMain(): void {
     /**
      * Withholds every trusted event of a kind from the page: for the release of a key or a mouse button that has to be
      * sent, so the browser does not keep it down, but must not take effect. A release is what activates (a click, Space
-     * on a button), and no handler and no default action runs for a cancelled one.
+     * on a button), and no default action runs for a cancelled one (a page capture listener on the window that was
+     * registered before the guard may still see it).
      */
     armBlockGuard(kind: 'pointer' | 'text', lifetimeMs = 4000) {
       guard?.remove();
@@ -1077,13 +1171,15 @@ export function probeMain(): void {
 
     /** A short description of an element for messages: tag, id, classes, role and text (`shownText`). */
     describe(node: Node) {
-      const el = (node.nodeType === 1 ? node : node.parentElement) as Element | null;
-      if (!el) return node.nodeName.toLowerCase();
-      let out = el.tagName.toLowerCase();
-      if (el.id) out += `#${el.id}`;
-      const classes = typeof el.className === 'string' ? el.className.trim().split(/\s+/).filter(Boolean) : [];
+      const el = (nodeProp(node, 'nodeType') === 1 ? node : nodeProp(node, 'parentElement')) as Element | null;
+      if (!el) return (nodeProp(node, 'nodeName') as string).toLowerCase();
+      let out = (elemProp(el, 'tagName') as string).toLowerCase();
+      const id = elemProp(el, 'id');
+      if (id) out += `#${id}`;
+      const className = elemProp(el, 'className');
+      const classes = typeof className === 'string' ? className.trim().split(/\s+/).filter(Boolean) : [];
       if (classes.length) out += `.${classes.slice(0, 3).join('.')}`;
-      const role = el.getAttribute('role');
+      const role = attrOf(el, 'role');
       if (role) out += `[role=${role}]`;
       const text = shownText(el, 60);
       if (text) out += ` "${text}"`;

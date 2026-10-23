@@ -45,6 +45,12 @@ export interface Observation {
   body: string;
   /** Tool-generated notices about omissions. */
   notices: string[];
+  /**
+   * The part of `notices` that says the capture itself is incomplete (frames not captured, content that could not be
+   * placed, a tree cut at its depth, masked fields, missing layout), as opposed to what the window and the budget left
+   * out of the printed outline. `find`, `read` and a semantic target look at the whole tree, so only these apply there.
+   */
+  captureNotices: string[];
   /** Refs printed; exactly the refs the agent may use from this observation. */
   refs: string[];
   /**
@@ -132,8 +138,14 @@ export function buildObservation(capture: Capture, registry: RefRegistry, option
   });
 
   const notices: string[] = [];
+  // Notices about the capture itself, kept apart from those about the window and the budget (also in `notices`).
+  const captureNotices: string[] = [];
+  const captureNotice = (text: string) => {
+    notices.push(text);
+    captureNotices.push(text);
+  };
   if (contextMissing)
-    notices.push('… some refs inside rows or list items have no record context: their frame has no layout snapshot.');
+    captureNotice('… some refs inside rows or list items have no record context: their frame has no layout snapshot.');
   let selected = roots;
   if (options.scope) {
     const node = findScope(roots, options.scope);
@@ -192,31 +204,31 @@ export function buildObservation(capture: Capture, registry: RefRegistry, option
     byReason.set(reason, [...(byReason.get(reason) ?? []), frame.url]);
   }
   for (const [reason, urls] of byReason) {
-    notices.push(`… ${urls.length} frame${urls.length > 1 ? 's' : ''} not captured: ${reason}.`);
+    captureNotice(`… ${urls.length} frame${urls.length > 1 ? 's' : ''} not captured: ${reason}.`);
   }
   // Captured content left out because its iframe is not in the outline (for example inside aria-hidden).
   const lost = orphans.filter(o => o.status === 'captured').length;
   if (lost)
-    notices.push(
+    captureNotice(
       lost > 1
         ? `… ${lost} captured frames could not be placed under their iframes (not in the accessibility tree, for example inside aria-hidden) and are not shown; a screenshot paints over them.`
         : '… 1 captured frame could not be placed under its iframe (not in the accessibility tree, for example inside aria-hidden) and is not shown; a screenshot paints over it.',
     );
-  if (capture.frames[0]?.status !== 'captured') notices.push('The main frame could not be captured.');
+  if (capture.frames[0]?.status !== 'captured') captureNotice('The main frame could not be captured.');
   if (deepCut)
-    notices.push(
+    captureNotice(
       `… ${deepCut} part${deepCut > 1 ? 's' : ''} of the page ${deepCut > 1 ? 'are' : 'is'} nested deeper than ${MAX_TREE_DEPTH} levels: only controls the layout snapshot finds there are listed, under the deepest element shown.`,
     );
   if (unknownMasked)
-    notices.push(
+    captureNotice(
       `… ${unknownMasked} field value${unknownMasked > 1 ? 's are' : ' is'} masked because the field's attributes could not be read.`,
     );
   if (!capture.layout) {
-    notices.push(
+    captureNotice(
       `Layout was not captured${capture.layoutError ? ` (${capture.layoutError})` : ''}: the outline is built from the accessibility tree alone, the whole page is printed, and elements without an accessibility role are not listed.`,
     );
   } else if (layout.frames < counts.captured) {
-    notices.push(
+    captureNotice(
       `… layout is missing for ${counts.captured - layout.frames} captured frame(s); their elements without an accessibility role are not listed.`,
     );
   }
@@ -238,6 +250,7 @@ export function buildObservation(capture: Capture, registry: RefRegistry, option
     header,
     body: lines.map(l => l.text).join('\n'),
     notices,
+    captureNotices,
     refs: lines.filter(l => l.ref).map(l => l.ref!),
     shown,
     entries: entriesOf(lines),

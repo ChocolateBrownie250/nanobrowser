@@ -41,6 +41,20 @@ export function defuse(text: string, options: DefuseOptions = {}): string {
 }
 
 /**
+ * `text.slice(0, end)` that never ends in the first half of a surrogate pair (an emoji, a rare CJK character): a cut
+ * that lands between the halves backs up one unit, so the result holds no lone surrogate that a model API could reject.
+ */
+export function sliceWhole(text: string, end: number): string {
+  let at = Math.min(Math.max(end, 0), text.length);
+  if (at > 0 && at < text.length) {
+    const before = text.charCodeAt(at - 1);
+    const after = text.charCodeAt(at);
+    if (before >= 0xd800 && before <= 0xdbff && after >= 0xdc00 && after <= 0xdfff) at -= 1;
+  }
+  return text.slice(0, at);
+}
+
+/**
  * The one quoting rule for a page fragment in the layer's own lines: `«…»`, on one line, at most `max` characters,
  * whitespace collapsed and any `«` or `»` inside removed, with the marker's shape and invisible characters defused. A
  * fragment cannot add a line, so it cannot pose as the tool's own text. The session defuses the host's labels inside
@@ -52,7 +66,7 @@ export function quote(text: string | undefined | null, max = 200, options: Defus
     .replace(/[«»]/g, '')
     .replace(/\s+/g, ' ')
     .trim();
-  if (t.length > max) t = `${t.slice(0, max - 1)}…`;
+  if (t.length > max) t = `${sliceWhole(t, max - 1)}…`;
   return `«${t}»`;
 }
 
@@ -114,11 +128,11 @@ export function cutText(text: string, max: number, hint: string): string {
       return `${text.slice(0, Math.max(0, announce))}\n${hint}`;
     }
     if (max < stop) {
-      const body = text.slice(0, max);
+      const body = sliceWhole(text, max);
       return `${body}${body.endsWith('\n') ? '' : '\n'}${endMarker}\n${hint}`;
     }
   }
-  return `${text.slice(0, max)}\n${hint}`;
+  return `${sliceWhole(text, max)}\n${hint}`;
 }
 
 export function errorLine(error: ProtocolError): string {

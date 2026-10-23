@@ -66,8 +66,24 @@ function withAttachmentIds(schema: unknown): unknown {
   };
 }
 
+/**
+ * The size bounds of the layer's request schemas (`maxLength`, `maxItems`) are enforced when the call arrives, and the
+ * answer names the bound. They are left out of the schema the model sees: they repeat on every field, and the fixed
+ * part of every request, tools included, counts against the context window.
+ */
+function withoutBounds(node: unknown): unknown {
+  if (Array.isArray(node)) return node.map(withoutBounds);
+  if (!node || typeof node !== 'object') return node;
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(node)) {
+    if (key === 'maxLength' || key === 'maxItems') continue;
+    out[key] = withoutBounds(value);
+  }
+  return out;
+}
+
 function schemaWithout(schema: unknown, hidden: string[]): unknown {
-  const s = { ...(schema as Record<string, unknown>) };
+  const s = { ...(withoutBounds(schema) as Record<string, unknown>) };
   delete s.$schema;
   if (s.properties && typeof s.properties === 'object') {
     const props = { ...(s.properties as Record<string, unknown>) };

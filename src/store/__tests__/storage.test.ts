@@ -33,6 +33,34 @@ describe('createStorage', () => {
     vi.unstubAllGlobals();
   });
 
+  it('keeps both updates of two sets started together', async () => {
+    const { area, data } = fakeChromeStorage();
+    vi.stubGlobal('chrome', { storage: { local: area } });
+    const rules = createStorage<Record<string, { rule: string }>>('rules', {}, { liveUpdate: true });
+    await rules.get();
+    await Promise.all([
+      rules.set(r => ({ ...r, 'a.example': { rule: 'allow' } })),
+      rules.set(async r => ({ ...r, 'b.example': { rule: 'allow' } })),
+      rules.set(r => ({ ...r, 'c.example': { rule: 'ask' } })),
+    ]);
+    expect(Object.keys(data.rules as object).sort()).toEqual(['a.example', 'b.example', 'c.example']);
+    vi.unstubAllGlobals();
+  });
+
+  it('runs the next set after one fails', async () => {
+    const { area, data } = fakeChromeStorage();
+    vi.stubGlobal('chrome', { storage: { local: area } });
+    const storage = createStorage('k', 0, {});
+    const failing = storage.set(() => {
+      throw new Error('boom');
+    });
+    const next = storage.set(prev => prev + 1);
+    await expect(failing).rejects.toThrow('boom');
+    await next;
+    expect(data.k).toBe(1);
+    vi.unstubAllGlobals();
+  });
+
   it('merges stored settings over the defaults', () => {
     expect(mergeSettings(undefined)).toEqual(DEFAULT_SETTINGS);
     expect(mergeSettings({ turnCap: 7 }).turnCap).toBe(7);

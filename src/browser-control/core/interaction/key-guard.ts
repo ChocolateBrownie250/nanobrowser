@@ -13,7 +13,7 @@ import type { FrameRecord, PagePort } from '../ports';
 import type { DialogInfo } from './pointer';
 import { watchDialog } from './pointer';
 import { releaseActivates } from './keys';
-import { sendWithheld } from './withheld';
+import { GUARD_CANCELLED_HINT, sendWithheld } from './withheld';
 import { quote } from '../text';
 
 /** A guard lasts this long after the last renewal. */
@@ -80,11 +80,19 @@ export class KeyGuard {
   }
 
   #fail(why: string, details?: unknown): never {
+    // A key the target accepted ran its page handlers, even if a later event of the same key was cancelled.
+    const arrived = this.options.delivered || this.#acceptedSeen > 0;
+    // A key that was sent and cancelled by the guard may still have been seen by a page capture listener on the window
+    // (registered before the guard): delivery is unknown. A refusal before any key was sent dispatched nothing.
+    const sentUnseen = this.#sent > this.#arrived;
     throw new LayerError(
       'INTERCEPTED',
-      `The input for ${this.target.description} was cancelled: ${why}. ${this.options.progress(this.#arrived, this.#sent)}`,
-      // A key the target accepted ran its page handlers, even if a later event of the same key was cancelled.
-      { delivered: this.options.delivered || this.#acceptedSeen > 0, details },
+      `The input for ${this.target.description} was cancelled: ${why}. ${this.options.progress(this.#arrived, this.#sent)}${arrived || !sentUnseen ? '' : ' The guard stopped it before it reached the target, but a script that listens on the whole page in the capture phase may have seen it.'}`,
+      {
+        delivered: arrived ? true : sentUnseen ? 'unknown' : false,
+        ...(arrived || !sentUnseen ? {} : { hint: GUARD_CANCELLED_HINT }),
+        details,
+      },
     );
   }
 
@@ -118,6 +126,14 @@ export class KeyGuard {
    */
   async unit(send: () => Promise<void>): Promise<DialogInfo | undefined> {
     await this.#check(false);
+    // Stop cancels a long sequence between two units: nothing more is sent, and what did arrive is said.
+    if (this.ctx.signal?.aborted) {
+      throw new LayerError(
+        'CANCELLED',
+        `The call was cancelled while the input for ${this.target.description} was being sent. ${this.options.progress(this.#arrived, this.#sent)}`,
+        { delivered: this.options.delivered || this.#sent > 0 },
+      );
+    }
     this.#sent++;
     return this.#race(send);
   }
