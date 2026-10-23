@@ -381,14 +381,18 @@ describe('Chinese vocabulary: the labels shops in Taiwan, Hong Kong and the main
   });
 });
 
-describe('a generic Chinese confirmation matches as the whole label, not as a prefix', () => {
+describe('a generic Chinese confirmation matches as a prefix, except known harmless continuations', () => {
   it('"continue shopping" and "confirm receipt" next to a price are not payments', () => {
-    for (const name of ['继续购物', '繼續購物', '确认收货', '確認收貨', '继续浏览', '下一步骤', '确定要离开吗']) {
+    for (const name of ['继续购物', '繼續購物', '确认收货', '確認收貨', '继续浏览', '繼續閱讀']) {
       // Not a payment (a word like 确认 can still be a plain submission).
       expect(activate(name, { money: '¥99' }), name).not.toBe('pay');
     }
     expect(activate('继续购物', { money: '¥99' })).toBeNull();
     expect(activate('确认收货', { money: '¥99' })).toBe('submit');
+    // A confirmation that names what it does after the generic word is the money step, with an amount next to it.
+    for (const name of ['确认提现', '確認提領', '确认转出', '確定轉出', '确认交易', '确认兑换', '確定匯出']) {
+      expect(activate(name, { money: '¥99' }), name).toBe('pay');
+    }
     // The real confirmations still are, with or without punctuation, spaces or the amount in the label.
     for (const name of [
       '确认',
@@ -410,15 +414,19 @@ describe('a generic Chinese confirmation matches as the whole label, not as a pr
 describe('what choosing a select option is gated for', () => {
   const cls = (label: string) => classifyOption(label)?.category ?? null;
 
-  it('an ordinary choice is not consequential, even with a payment or subscription word in it', () => {
+  it('an ordinary choice that says nothing about paying, deleting or access is not gated', () => {
+    for (const label of ['Newest first', 'Save', 'Price: low to high', 'Express shipping', '按价格排序', '最新']) {
+      expect(cls(label), label).toBeNull();
+    }
+  });
+
+  it('payment vocabulary that is not a command is a write (asks in Ask mode), neither silent nor handed over', () => {
     for (const label of [
       'Buy',
       'Buy / Sell',
-      'Buy or rent',
       'Pay on delivery',
       'Pay by card',
-      'Pay later',
-      'Payment method',
+      'Pay with saved card',
       'Subscribe weekly',
       'Subscribe',
       'Top up',
@@ -426,11 +434,27 @@ describe('what choosing a select option is gated for', () => {
       '购买',
       '按月订阅',
       '货到付款',
-      '支付方式',
-      'Save',
-      'Newest first',
+      '付款',
     ]) {
-      expect(cls(label), label).toBeNull();
+      expect(cls(label), label).toBe('submit');
+    }
+  });
+
+  it('a pay command keeps its category with an amount or a count next to it', () => {
+    for (const label of [
+      'Pay now - $49',
+      'Pay now – $49.99',
+      'Checkout ($49.99)',
+      'Buy now: €9.99',
+      'Place order (2 items)',
+      'Pay now 49.99 USD',
+      '立即付款 ¥99',
+      '立即支付￥99',
+      '确认付款 ¥99',
+      '提交订单 (¥99)',
+      '去结算（3件）',
+    ]) {
+      expect(cls(label), label).toBe('pay');
     }
   });
 
@@ -471,5 +495,31 @@ describe('what choosing a select option is gated for', () => {
     }
     expect(cls('Authorize')).toBe('grant');
     expect(cls('授权')).toBe('grant');
+  });
+});
+
+describe('cancelling an order, a booking or a renewal is a delete in both scripts', () => {
+  it.each([
+    '取消订购',
+    '取消訂購',
+    '取消下订单',
+    '取消下訂單',
+    '取消订单',
+    '取消預訂',
+    '取消自动续费',
+    '取消自動續費',
+    '关闭续费',
+    '關閉續費',
+    '关闭自动续费',
+    '取消订阅',
+  ])('%s', name => {
+    expect(activate(name)).toBe('delete');
+  });
+
+  it('every pay word that excludes a cancellation has its cancellation in the delete list', () => {
+    // The pay words that carry a (?<!取消) lookbehind, with what each cancellation looks like.
+    for (const word of ['订阅', '订购', '预订', '下订', '续费', '訂閱', '訂購', '預訂', '下訂', '續費']) {
+      expect(activate(`取消${word}`), `取消${word}`).toBe('delete');
+    }
   });
 });

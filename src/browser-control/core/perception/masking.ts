@@ -20,9 +20,14 @@ const PIN_CAMEL = /[a-z](?:PIN|Pin)(?![a-z])/;
 // A PIN that is a secret says so: a bank, card or ATM PIN, a security or verification PIN, one for logging in.
 const PIN_SECRET_CONTEXT =
   /secret|secur|card|atm|debit|credit|bank|verif|login|log.?in|sign.?in|account|password|passcode|otp|auth|transaction|wallet|upi/i;
-// A postal PIN code (India's postal index number) sits in an address: the label has address words.
-const PIN_POSTAL_CONTEXT =
-  /postal|post.?code|zip|address|area|city|town|district|locality|village|province|landmark|street/i;
+// A postal PIN code (India's postal index number) is called a "PIN code" and sits in an address form: the names say
+// "PIN code" together with an address word, or they say postal or zip. Address words are whole words ("city" inside
+// "electricity" is not one), and a PIN that only mentions an address ("the PIN we mailed to your address") is a secret.
+const PIN_CODE_WORD = /(?<![a-z])pin[\s_-]*code(?![a-z])/i;
+const PIN_CODE_CAMEL = /[a-z]Pin[\s_-]*Code(?![a-z])/;
+const POSTAL_WORD = /(?<![a-z])(?:postal|zip)(?![a-z])/i;
+const ADDRESS_WORD =
+  /(?<![a-z])(?:post.?code|address|area|city|town|district|locality|village|province|landmark|street)(?![a-z])/i;
 const POSTAL_AUTOCOMPLETE = /(^|\s)postal-code(\s|$)/;
 
 function sensitiveName(text: string | undefined): boolean {
@@ -32,15 +37,18 @@ function sensitiveName(text: string | undefined): boolean {
 /**
  * Whether any of a field's names (name, id, placeholder, label) names a secret. A bare "PIN" is one, as are "PIN code"
  * and "Enter your PIN"; a "PIN code" that is a postal code is not: the browser calls the field a postal code
- * (`autocomplete="postal-code"`), or the names carry address words and no secret ones ("PIN code of your delivery
- * address"). A secret word anywhere ("ATM PIN", "Card PIN", "Security PIN") keeps it a secret.
+ * (`autocomplete="postal-code"`), the names say postal or zip, or they say "PIN code" next to an address word ("PIN
+ * code of your delivery address"). A secret word anywhere ("ATM PIN", "Card PIN", "Security PIN") keeps it a secret.
  */
 function sensitiveNames(texts: Array<string | undefined>, autocomplete: string | undefined): boolean {
   if (texts.some(sensitiveName)) return true;
   const names = texts.filter((t): t is string => !!t);
   if (!names.some(t => PIN_WORD.test(t) || PIN_CAMEL.test(t))) return false;
   if (names.some(t => PIN_SECRET_CONTEXT.test(t))) return true;
-  const postal = POSTAL_AUTOCOMPLETE.test(autocomplete ?? '') || names.some(t => PIN_POSTAL_CONTEXT.test(t));
+  const postal =
+    POSTAL_AUTOCOMPLETE.test(autocomplete ?? '') ||
+    names.some(t => POSTAL_WORD.test(t)) ||
+    (names.some(t => PIN_CODE_WORD.test(t) || PIN_CODE_CAMEL.test(t)) && names.some(t => ADDRESS_WORD.test(t)));
   return !postal;
 }
 

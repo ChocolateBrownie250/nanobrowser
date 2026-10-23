@@ -245,6 +245,36 @@ export function probeMain(): void {
   ): any => (Element.prototype as any)[name].apply(e, args);
   const rootOf = (n: Node): Node => Node.prototype.getRootNode.call(n);
   const attrOf = (e: Element, name: string): string | null => elemCall(e, 'getAttribute', name);
+  // `text.slice(0, end)` that never ends between the two halves of a surrogate pair (the same rule as sliceWhole in
+  // core/text.ts, which the probe cannot import).
+  const sliceWhole = (text: string, end: number): string => {
+    let at = Math.min(Math.max(end, 0), text.length);
+    if (at > 0 && at < text.length) {
+      const before = text.charCodeAt(at - 1);
+      const after = text.charCodeAt(at);
+      if (before >= 0xd800 && before <= 0xdbff && after >= 0xdc00 && after <= 0xdfff) at -= 1;
+    }
+    return text.slice(0, at);
+  };
+  // A control that is activated, not typed into, whatever editing region it sits in (every descendant of one reports
+  // `isContentEditable`) and whatever else its role says: a button, a link, a summary, a select, or an element with one
+  // of those roles. The same list as keys.ts (CONTROL_TAGS, CONTROL_ROLES); the probe cannot import it.
+  const CONTROL_ROLE_LIST = [
+    'button',
+    'link',
+    'checkbox',
+    'radio',
+    'switch',
+    'menuitem',
+    'menuitemcheckbox',
+    'menuitemradio',
+    'tab',
+    'option',
+    'treeitem',
+  ];
+  const isControlEl = (e: Element): boolean =>
+    ['button', 'a', 'area', 'summary', 'select'].includes((elemProp(e, 'tagName') as string).toLowerCase()) ||
+    CONTROL_ROLE_LIST.includes((attrOf(e, 'role') ?? '').trim().toLowerCase());
 
   const disabledByAncestor = (el: Element): boolean => {
     for (let node: Element | null = el; node;) {
@@ -339,7 +369,7 @@ export function probeMain(): void {
     let out = '';
     for (let n = walker.nextNode(); n && out.length <= max * 2; n = walker.nextNode()) out += ` ${n.nodeValue ?? ''}`;
     out = out.replace(/\s+/g, ' ').trim();
-    return out.length > max ? `${out.slice(0, max - 1)}…` : out;
+    return out.length > max ? `${sliceWhole(out, max - 1)}…` : out;
   };
 
   /** A control that holds a value: a text-like input, a textarea or a select (a button's value is its caption). */
@@ -491,7 +521,8 @@ export function probeMain(): void {
       const contentEditable = htmlProp(el, 'isContentEditable') === true;
       const enabled = !disabledByAncestor(el);
       const readOnly = textInput && (input.readOnly || attrOf(el, 'aria-readonly') === 'true');
-      const editable = enabled && ((textInput && !readOnly) || contentEditable);
+      // A button or link inside an editing region reports contentEditable, but it is a control, not a place to type.
+      const editable = enabled && ((textInput && !readOnly) || (contentEditable && !isControlEl(el)));
       let checked: boolean | 'mixed' | null = null;
       if (tag === 'input' && (type === 'checkbox' || type === 'radio'))
         checked = input.indeterminate ? 'mixed' : input.checked;
@@ -754,21 +785,7 @@ export function probeMain(): void {
       const role = (attrOf(el, 'role') ?? '').trim().toLowerCase();
       // A place to type: a text field, an editing region (a control inside one inherits that and is not a place to
       // type), or an element that says it is a text box or search box.
-      const control =
-        ['button', 'a', 'area', 'summary', 'select'].includes(tag) ||
-        [
-          'button',
-          'link',
-          'checkbox',
-          'radio',
-          'switch',
-          'menuitem',
-          'menuitemcheckbox',
-          'menuitemradio',
-          'tab',
-          'option',
-          'treeitem',
-        ].includes(role);
+      const control = isControlEl(el);
       const textEntry =
         tag === 'textarea' ||
         (tag === 'input' && [...BLOCKING, ''].includes(type) && type !== 'password') ||
@@ -926,7 +943,7 @@ export function probeMain(): void {
       // same steps as the capture's digest (`digestOf` in layout.ts), so indentation cannot make the two differ.
       for (let n = walker.nextNode(); n && out.length <= max; n = walker.nextNode())
         out = (out + (n.nodeValue ?? '')).replace(/\s+/g, ' ').trimStart();
-      return out.trim().slice(0, max);
+      return sliceWhole(out.trim(), max);
     },
 
     /**

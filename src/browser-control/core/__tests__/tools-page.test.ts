@@ -6,7 +6,7 @@ import { LayerError } from '../../protocol/errors';
 import type { FormFacts, NavigationTarget, ProbeState } from '../../probe';
 import { VIA_LABEL_NOTE } from '../interaction/actionability';
 import { click } from '../tools/act';
-import { press, set } from '../tools/text';
+import { press, set, type as typeText } from '../tools/text';
 import { PLAIN_FACTS, PLAIN_STATE, makeHarness, pageCdp, pageProbe, showElement } from './harness';
 import type { FakeProbe } from './harness';
 
@@ -155,6 +155,31 @@ describe('press: a control is judged as itself whatever editing region or role i
       expect(sent).toEqual([]);
     });
   }
+});
+
+describe('type: a button inside an editing region is not a field', () => {
+  it('type with submit on a "Pay now" button in a contenteditable region is refused before any key is sent', async () => {
+    const sent: string[] = [];
+    const p = prompt('approve');
+    const h = await makeHarness({
+      config: { handover: true },
+      prompt: p,
+      page: keyPort(sent),
+      probe: pageProbe({
+        // What the probe reports for such a button: it inherits isContentEditable, but it is not editable.
+        state: () => state({ tag: 'button', type: 'submit', contentEditable: true, editable: false }),
+        formFacts: () => facts({ tag: 'button', type: 'submit', textEntry: false }),
+      }),
+      cdpReply: pageCdp(),
+    });
+    const ref = showElement(h, { role: 'button', name: 'Pay now', tag: 'button' });
+    const error = await rejection(
+      typeText(h.ctx, { target: { ref }, text: 'x', submit: true, timeoutMs: 200 } as never),
+    );
+    expect(error.code).toBe('NOT_EDITABLE');
+    expect(sent).toEqual([]);
+    expect(p.confirm).not.toHaveBeenCalled();
+  });
 });
 
 describe('click through a hidden input’s label is named in the receipt', () => {

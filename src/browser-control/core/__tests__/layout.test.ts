@@ -81,6 +81,8 @@ describe('tier 2: layout snapshot', () => {
   it('defines the text digest once: whitespace collapsed, first 80 characters', () => {
     expect(digestText('  a \n\t b  ')).toBe('a b');
     expect(digestText('x'.repeat(100))).toHaveLength(80);
+    // A cut between the two halves of an emoji backs up one unit.
+    expect(digestText(`${'x'.repeat(79)}😀 more`)).toBe('x'.repeat(79));
   });
 
   it('leaves pages without non-semantic controls as tier 1 printed them', () => {

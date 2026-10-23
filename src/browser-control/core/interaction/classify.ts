@@ -124,6 +124,10 @@ export const DELETE_WORDS = vocabulary(
     '取消预订',
     '取消会员',
     '取消续费',
+    '取消订购',
+    '取消下订',
+    '取消自动续费',
+    '关闭续费',
     '关闭自动续费',
     '退订',
     '关闭账户',
@@ -138,6 +142,10 @@ export const DELETE_WORDS = vocabulary(
     '取消預訂',
     '取消會員',
     '取消續費',
+    '取消訂購',
+    '取消下訂',
+    '取消自動續費',
+    '關閉續費',
     '關閉自動續費',
     '退訂',
     '關閉帳戶',
@@ -225,13 +233,16 @@ function onConsentPage(url: string | undefined): boolean {
 }
 
 /**
- * A generic confirmation label: pay when a money amount is next to it. The English words match at a word boundary.
- * The Chinese ones must be the whole label, with at most punctuation, symbols, spaces or digits (an amount) after
- * them: a longer label such as 继续购物 ("continue shopping") or 确认收货 ("confirm receipt") says what it does and is
- * not a payment because a price sits nearby.
+ * A generic confirmation label: pay when a money amount is next to it. The English words match at a word boundary. The
+ * Chinese ones match as a prefix ("确认提现", "確定轉出" move money and name what they do after the generic word), except
+ * when what follows is a known harmless continuation: 继续购物 ("continue shopping") or 确认收货 ("confirm receipt") says
+ * what it does and is not a payment because a price sits nearby.
  */
-export const GENERIC_CONFIRM =
-  /^(?:(?:confirm|ok|okay|continue|next|proceed|agree|submit|yes)(?:\b|$)|(?:确认|確認|确定|確定|继续|繼續|下一步)(?=$|[\s\p{P}\p{S}\d]))/iu;
+export const GENERIC_CONFIRM = new RegExp(
+  '^(?:(?:confirm|ok|okay|continue|next|proceed|agree|submit|yes)(?:\\b|$)|' +
+    '(?:确认|確認|确定|確定|继续|繼續|下一步)(?!购物|購物|收货|收貨|浏览|瀏覽|阅读|閱讀|观看|觀看|学习|學習|添加|编辑|編輯))',
+  'i',
+);
 const DELETE_CLASSES = /(^|[\s_-])(delete|remove|destroy|trash|discard)([\s_-]|$)/i;
 
 export interface ClassifyInput {
@@ -274,9 +285,10 @@ export function classifyShortcut(): Classification {
 }
 
 /**
- * A label that is, as a whole, a command to pay: "Pay now", "Place order", "Checkout", "立即支付", "提交订单". A select's
- * options are choices before they are commands, so a payment word inside a longer or plainer label ("Buy", "Pay on
- * delivery", "Subscribe weekly", "货到付款") is not one. Only a label that can mean nothing but paying is.
+ * A label that is, as a whole, a command to pay: "Pay now", "Place order", "Checkout", "立即支付", "提交订单", with or
+ * without an amount or a count next to it ("Pay now - $49", "Checkout ($49.99)", "立即付款 ¥99"). A select's options are
+ * choices before they are commands, so a payment word inside a longer or plainer label ("Buy", "Pay on delivery",
+ * "Subscribe weekly", "货到付款") is not one. Only a label that can mean nothing but paying is.
  */
 const PAY_COMMAND = new RegExp(
   `^(?:${[
@@ -297,23 +309,38 @@ const PAY_COMMAND = new RegExp(
   'iu',
 );
 
+/** A label without the amounts and counts written next to it: "(2 items)", "$49", "¥99", "49.99 USD", "99元". */
+function withoutAmounts(label: string): string {
+  return label
+    .replace(/[(（][^)）]*[)）]/gu, ' ')
+    .replace(/[$€£¥￥₹₩]\s?\d[\d.,]*|\d[\d.,]*\s?(?:usd|eur|gbp|jpy|cny|rmb|inr|元|円)?/giu, ' ')
+    .trim();
+}
+
 /**
  * What choosing a menu option does, judged by its label alone. Destructive vocabulary ("Delete account", "Cancel
  * order", "Move to Trash") and access vocabulary are judged as for a control, because choosing such an option does what
- * it says wherever the page acts on the choice. Payment is narrower: only a label that is a command to pay as a whole
- * (PAY_COMMAND), since "Buy", "Pay on delivery" or "Subscribe weekly" are ordinary choices in a dropdown. Submission
- * vocabulary is left out on purpose: "Update" or "Save" among a select's options is more often a sort order or a
- * setting than a submission. Null when the label says nothing.
+ * it says wherever the page acts on the choice. A label that is, as a whole, a command to pay (PAY_COMMAND) is a
+ * payment. Other payment vocabulary ("Buy", "Pay on delivery", "Subscribe weekly", "Pay with saved card") is an ordinary
+ * choice in a dropdown most of the time, but it may carry the payment out on change: it is a write (`submit`), which
+ * asks in Ask mode, and neither runs silently nor is handed over. Submission vocabulary is left out on purpose:
+ * "Update" or "Save" among a select's options is more often a sort order or a setting than a submission. Null when the
+ * label says nothing.
  */
 export function classifyOption(label: string, url?: string): Classification | null {
   const text = label.trim();
-  if (PAY_COMMAND.test(text)) return { category: 'pay', reason: `the option ${quote(text)} is a payment command` };
+  if (PAY_COMMAND.test(withoutAmounts(text))) {
+    return { category: 'pay', reason: `the option ${quote(text)} is a payment command` };
+  }
   if (GRANT_WORDS.test(text)) return { category: 'grant', reason: `the option ${quote(text)} grants access` };
   if (AFFIRMATIVE.test(text) && onConsentPage(url)) {
     return { category: 'grant', reason: `the option ${quote(text)} on a consent page` };
   }
   if (DELETE_WORDS.test(text)) {
     return { category: 'delete', reason: `the option ${quote(text)} is destructive vocabulary` };
+  }
+  if (PAY_WORDS.test(text)) {
+    return { category: 'submit', reason: `the option ${quote(text)} is payment vocabulary, and choosing it may pay` };
   }
   return null;
 }

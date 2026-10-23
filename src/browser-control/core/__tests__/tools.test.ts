@@ -280,18 +280,31 @@ describe('choosing an option of a select is judged by the option', () => {
     expect(prompt.confirm).not.toHaveBeenCalled();
   });
 
-  it('a plain choice such as Buy, Pay on delivery or Subscribe weekly is selected without asking, even in a hand-over session', async () => {
-    const prompt = scriptedPrompt('decline');
+  it('a plain choice such as Buy, Pay on delivery or Subscribe weekly is a write: not handed over, asked in Ask mode', async () => {
     for (const label of ['Buy', 'Pay on delivery', 'Subscribe weekly']) {
+      const prompt = scriptedPrompt('decline');
       const h = await makeHarness({
         config: { handover: true },
         prompt,
-        probe: { matchOptions: () => optionsOf(label) },
+        probe: { matchOptions: () => optionsOf(label), navigationTarget: () => null },
       });
-      await expect(gateChosenOption(h.ctx, selectTarget(), [label], args(label))).resolves.toMatchObject({
-        gate: null,
-      });
+      const error = await rejection(gateChosenOption(h.ctx, selectTarget(), [label], args(label)));
+      // Declined at the card, not refused as the user's own step (USER_STEP).
+      expect(error.code, label).toBe('USER_DECLINED');
+      expect(prompt.confirm).toHaveBeenCalledTimes(1);
+      expect(prompt.confirm.mock.calls[0][0].category).toBe('submit');
     }
+  });
+
+  it('the same plain choice runs without a card where writes run on their own (Auto mode)', async () => {
+    const prompt = scriptedPrompt('decline');
+    const h = await makeHarness({
+      prompt,
+      config: { decideWrite: () => ({ decision: 'run', by: 'auto', canRemember: false }) },
+      probe: { matchOptions: () => optionsOf('Pay on delivery') },
+    });
+    const { gate } = await gateChosenOption(h.ctx, selectTarget(), ['Pay on delivery'], args('Pay on delivery'));
+    expect(gate).toMatchObject({ category: 'submit', allowedBy: 'auto', prompted: false });
     expect(prompt.confirm).not.toHaveBeenCalled();
   });
 

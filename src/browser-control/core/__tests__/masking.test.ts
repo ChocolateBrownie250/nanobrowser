@@ -151,7 +151,7 @@ describe('secret fields named in Chinese, and card and PIN codes', () => {
     expect(field('pin', '', { autocomplete: 'postal-code' })).toBe(false);
     expect(field('postal_pin', 'Postal PIN code')).toBe(false);
     expect(field('pin_code', 'PIN code of your delivery address')).toBe(false);
-    expect(field('pin_code', 'Area PIN')).toBe(false);
+    expect(field('pin_code', 'PIN code, area')).toBe(false);
     expect(field('x', '', { placeholder: 'Enter 6 digit PIN code of the city' })).toBe(false);
     expect(isSecretField(state({ name: 'pin_code', autocomplete: 'postal-code' }), 'PIN code')).toBe(false);
     expect(isSecretField(state({ name: 'pin_code' }), 'PIN code (postal address)')).toBe(false);
@@ -164,6 +164,15 @@ describe('secret fields named in Chinese, and card and PIN codes', () => {
     expect(field('pin', 'Card PIN')).toBe(true);
     expect(field('pin', 'Security PIN for your account address')).toBe(true);
     expect(field('pin', 'Verification PIN')).toBe(true);
+    // Mentioning an address, a city or a district is not saying "postal": a mailed or locker PIN is still a secret.
+    expect(field('pin', 'Enter the PIN we mailed to your address')).toBe(true);
+    expect(field('pin', 'PIN from the letter sent to your street address')).toBe(true);
+    expect(field('pin', 'Parcel locker PIN (pickup address)')).toBe(true);
+    expect(field('pin', 'Locker PIN for your district hub')).toBe(true);
+    expect(field('pin', 'Electricity board PIN')).toBe(true);
+    expect(field('address-pin', 'PIN')).toBe(true);
+    expect(field('pin', 'PIN', { placeholder: 'City / area' })).toBe(true);
+    expect(field('pin', 'Area PIN')).toBe(true);
     expect(field('pin', 'PIN', { autocomplete: 'one-time-code' })).toBe(true);
     expect(field('pin', 'Postal PIN', { type: 'password' })).toBe(true);
     expect(isSecretField(state({ name: 'pin' }), 'PIN')).toBe(true);

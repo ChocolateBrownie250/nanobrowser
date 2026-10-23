@@ -150,6 +150,46 @@ describe.skipIf(!chrome)('the probe in Chrome', () => {
     });
   });
 
+  describe('state: what can be typed into', () => {
+    const stateOf = async (html: string, selector: string) => {
+      const { page, call } = await withProbe(browser, `<!doctype html><body>${html}`);
+      try {
+        return (await call(selector, 'state')) as { editable: boolean };
+      } finally {
+        await page.close();
+      }
+    };
+
+    it('a button or link inside an editing region is a control, not a field; the region and its text are', async () => {
+      expect((await stateOf('<div contenteditable><button id="t">Pay now</button></div>', '#t')).editable).toBe(false);
+      expect((await stateOf('<div contenteditable><a id="t" href="/x" tabindex="0">Go</a></div>', '#t')).editable).toBe(
+        false,
+      );
+      expect(
+        (await stateOf('<div contenteditable><div id="t" role="button" tabindex="0">Send</div></div>', '#t')).editable,
+      ).toBe(false);
+      expect((await stateOf('<div contenteditable><span id="t">text</span></div>', '#t')).editable).toBe(true);
+      expect((await stateOf('<div id="t" contenteditable></div>', '#t')).editable).toBe(true);
+      expect((await stateOf('<textarea id="t"></textarea>', '#t')).editable).toBe(true);
+    });
+  });
+
+  describe('textDigest', () => {
+    it('never ends between the two halves of an emoji', async () => {
+      const { page, call } = await withProbe(
+        browser,
+        `<!doctype html><body><p id="t">${'a'.repeat(79)}\u{1F600} and more</p>`,
+      );
+      try {
+        const digest = (await call('#t', 'textDigest', 80)) as string;
+        expect(digest).toBe('a'.repeat(79));
+        expect(/[\ud800-\udbff]$/.test(digest)).toBe(false);
+      } finally {
+        await page.close();
+      }
+    });
+  });
+
   describe('select options', () => {
     const html = `<!doctype html><select id="s"><option value="a">Keep</option><option value="b">Delete account</option>
       <option value="c" label="Archive">Move to archive</option></select>`;
