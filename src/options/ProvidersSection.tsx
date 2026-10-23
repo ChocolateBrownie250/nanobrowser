@@ -155,7 +155,10 @@ export function ProvidersSection() {
             <Select
               aria-label={t('agent.reasoning')}
               value={effort.shown}
-              onChange={e => void settingsStorage.set(s => ({ ...s, reasoning: e.target.value as ReasoningEffort }))}>
+              onChange={e => {
+                const reasoning = e.target.value as ReasoningEffort;
+                void settingsStorage.set(s => ({ ...s, reasoning }));
+              }}>
               {effort.pills.map(value => (
                 <option key={value} value={value}>
                   {effortText(value, effortLabelsOf(providers, settings.defaultModel))}

@@ -4,6 +4,7 @@ export type StorageArea = 'local' | 'session';
 
 export interface Storage<D> {
   get(): Promise<D>;
+  /** An updater runs when its write's turn comes, after the caller returned: read anything mutable (an event's target) first. */
   set(value: D | ((previous: D) => D | Promise<D>)): Promise<void>;
   /** The last value read or written; null before the first read. */
   getSnapshot(): D | null;

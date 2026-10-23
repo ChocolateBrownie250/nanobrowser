@@ -81,7 +81,11 @@ export function UiLanguageRow() {
       <Select
         aria-label={t('language.ui')}
         value={settings.uiLanguage}
-        onChange={e => void settingsStorage.set(s => ({ ...s, uiLanguage: e.target.value as UiLanguage }))}>
+        onChange={e => {
+          // Read the choice now: the updater runs after the event, when a controlled select shows the old value again.
+          const uiLanguage = e.target.value as UiLanguage;
+          void settingsStorage.set(s => ({ ...s, uiLanguage }));
+        }}>
         <option value="auto">{t('language.auto')}</option>
         {Object.entries(LANGUAGE_NAMES).map(([value, name]) => (
           <option key={value} value={value}>
@@ -121,7 +125,10 @@ export function GeneralSection() {
           <Select
             aria-label={t('language.response')}
             value={settings.responseLanguage}
-            onChange={e => void settingsStorage.set(s => ({ ...s, responseLanguage: e.target.value }))}>
+            onChange={e => {
+              const responseLanguage = e.target.value;
+              void settingsStorage.set(s => ({ ...s, responseLanguage }));
+            }}>
             <option value="auto">{t('language.responseAuto')}</option>
             {RESPONSE_LANGUAGES.map(l => (
               <option key={l.value} value={l.value}>
@@ -136,7 +143,10 @@ export function GeneralSection() {
           <Select
             aria-label={t('language.theme')}
             value={settings.theme}
-            onChange={e => void settingsStorage.set(s => ({ ...s, theme: e.target.value as Theme }))}>
+            onChange={e => {
+              const theme = e.target.value as Theme;
+              void settingsStorage.set(s => ({ ...s, theme }));
+            }}>
             <option value="system">{t('theme.system')}</option>
             <option value="light">{t('theme.light')}</option>
             <option value="dark">{t('theme.dark')}</option>
