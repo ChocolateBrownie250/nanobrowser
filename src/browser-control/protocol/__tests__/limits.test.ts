@@ -6,6 +6,7 @@ import {
   FindArgsSchema,
   HandleDialogArgsSchema,
   NavigateArgsSchema,
+  PressArgsSchema,
   SetArgsSchema,
   TabsArgsSchema,
   TypeArgsSchema,
@@ -19,21 +20,27 @@ const ok = (schema: { safeParse(v: unknown): { success: boolean } }, value: unkn
 const target = { ref: 'e1' };
 
 describe('size limits of the request schemas', () => {
-  it('bounds typed and set text at 20 000 characters', () => {
+  it('bounds typed text at 20 000 characters and a value set in one command at 200 000', () => {
     expect(ok(TypeArgsSchema, { text: 'a'.repeat(20_000) })).toBe(true);
     expect(ok(TypeArgsSchema, { text: 'a'.repeat(20_001) })).toBe(false);
-    expect(ok(SetArgsSchema, { target, value: 'a'.repeat(20_000) })).toBe(true);
-    expect(ok(SetArgsSchema, { target, value: 'a'.repeat(20_001) })).toBe(false);
-    expect(ok(SetArgsSchema, { target, value: ['a'.repeat(20_001)] })).toBe(false);
+    expect(ok(SetArgsSchema, { target, value: 'a'.repeat(100_000) })).toBe(true);
+    expect(ok(SetArgsSchema, { target, value: 'a'.repeat(200_000) })).toBe(true);
+    expect(ok(SetArgsSchema, { target, value: 'a'.repeat(200_001) })).toBe(false);
+    expect(ok(SetArgsSchema, { target, value: ['a'.repeat(200_001)] })).toBe(false);
     expect(ok(SetArgsSchema, { target, value: true })).toBe(true);
     expect(ok(HandleDialogArgsSchema, { accept: true, promptText: 'a'.repeat(20_001) })).toBe(false);
+  });
+
+  it('bounds the keys of a press', () => {
+    expect(ok(PressArgsSchema, { keys: 'Control+A' })).toBe(true);
+    expect(ok(PressArgsSchema, { keys: 'a'.repeat(2_001) })).toBe(false);
   });
 
   it('bounds fill_form at 50 fields', () => {
     const field = { target, value: 'x' };
     expect(ok(FillFormArgsSchema, { fields: Array.from({ length: 50 }, () => field) })).toBe(true);
     expect(ok(FillFormArgsSchema, { fields: Array.from({ length: 51 }, () => field) })).toBe(false);
-    expect(ok(FillFormArgsSchema, { fields: [{ target, value: 'a'.repeat(20_001) }] })).toBe(false);
+    expect(ok(FillFormArgsSchema, { fields: [{ target, value: 'a'.repeat(200_001) }] })).toBe(false);
     expect(ok(FillFormArgsSchema, { fields: [] })).toBe(false);
   });
 
@@ -59,7 +66,7 @@ describe('size limits of the request schemas', () => {
     expect(ok(ClickArgsSchema, { target, expect: { text: long } })).toBe(false);
     expect(ok(ClickArgsSchema, { target, expect: { url: long } })).toBe(false);
     expect(ok(ClickArgsSchema, { target, expect: { textGone: long } })).toBe(false);
-    expect(ok(ClickArgsSchema, { target, expect: { value: 'a'.repeat(20_001) } })).toBe(false);
+    expect(ok(ClickArgsSchema, { target, expect: { value: 'a'.repeat(200_001) } })).toBe(false);
     expect(ok(ClickArgsSchema, { target, expect: { text: fits, url: fits, textGone: fits } })).toBe(true);
   });
 

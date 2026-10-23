@@ -127,6 +127,12 @@ describe('isUrlAllowed (the scheme is judged on the parsed address)', () => {
     expect(isUrlAllowed('https://evil.test/https://chromewebstore.google.com', [], [])).toBe(true);
   });
 
+  it('refuses a blob: URL whose inner address is not itself an http(s) address', () => {
+    expect(isUrlAllowed('blob:blob:https://bank.test/uuid', [], [])).toBe(false);
+    expect(isUrlAllowed('blob:about:blank', [], [])).toBe(false);
+    expect(isUrlAllowed('blob:null/uuid', [], [])).toBe(false);
+  });
+
   it('judges a blob: URL by the address that made it, with or without lists', () => {
     expect(isUrlAllowed('blob:https://good.test/uuid', [], [])).toBe(true);
     expect(isUrlAllowed('blob:chrome://settings/uuid', [], [])).toBe(false);

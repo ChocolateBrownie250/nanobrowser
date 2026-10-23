@@ -1,7 +1,7 @@
 // TabScope: which conversation each tab belongs to, how it came to be there, and each conversation's tab group. The
 // panel's address carries nothing: the worker keeps the map, in storage.session, since tab IDs do not outlive the
 // browser session. Grouping needs no permission; the group's title and colour need tabGroups, which is optional.
-import { siteOf } from '@src/browser-control';
+import { isBlockedSite } from '@src/browser-control';
 import type { RunStatus } from '@src/store/types';
 import type { ScopeTab } from '@src/ui/protocol';
 import { PANEL_PATH } from './panel';
@@ -136,8 +136,8 @@ export class TabScope {
   ): Promise<{ ok: true } | { ok: false; reason: 'blocked' | 'owned' | 'gone'; owner?: string }> {
     const tab = await chrome.tabs.get(tabId).catch(() => null);
     if (!tab) return { ok: false, reason: 'gone' };
-    const site = siteOf(tab.url ?? tab.pendingUrl ?? '');
-    if (site && this.hooks.blocked().includes(site)) return { ok: false, reason: 'blocked' };
+    // Same rule as the layer's: a Block entry covers the site and its subdomains.
+    if (isBlockedSite(tab.url ?? tab.pendingUrl ?? '', this.hooks.blocked())) return { ok: false, reason: 'blocked' };
     const state = await load();
     const current = state.tabs[tabId];
     if (current && current.conversationId !== conversationId) {

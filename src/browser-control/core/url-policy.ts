@@ -69,9 +69,14 @@ function drivableUrl(url: string): URL | null {
     case 'about:':
       return parsed.href === 'about:blank' ? parsed : null;
     case 'blob:': {
-      // What follows "blob:" must itself be an http(s) address (an opaque "null" origin has none).
-      const inner = drivableUrl(trimmed.slice(5));
-      return inner && inner.protocol !== 'about:' ? inner : null;
+      // What follows "blob:" must itself be an http(s) address (an opaque "null" origin has none), and not another blob.
+      let inner: URL;
+      try {
+        inner = new URL(trimmed.slice(5));
+      } catch {
+        return null;
+      }
+      return inner.protocol === 'http:' || inner.protocol === 'https:' ? inner : null;
     }
     default:
       return null;

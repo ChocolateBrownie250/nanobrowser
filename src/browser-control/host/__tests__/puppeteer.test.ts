@@ -60,11 +60,12 @@ describe('connectTab and disconnectTab have a budget', () => {
   });
   afterEach(() => vi.useRealTimers());
 
-  it('gives Puppeteer a protocol timeout well under its default of 180 s', async () => {
+  it('gives Puppeteer a protocol timeout under its default of 180 s but over the longest navigation', async () => {
     connect.mockResolvedValue(browser);
     browser.pages.mockResolvedValue([{}]);
     await connectTab(7);
-    expect(PROTOCOL_TIMEOUT_MS).toBeLessThanOrEqual(30_000);
+    // Over the longest navigation a call may ask for (120 s), so goto's own budget decides, not this one.
+    expect(PROTOCOL_TIMEOUT_MS).toBeGreaterThan(120_000);
     expect(connect).toHaveBeenCalledWith(expect.objectContaining({ protocolTimeout: PROTOCOL_TIMEOUT_MS, transport }));
   });
 

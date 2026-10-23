@@ -22,8 +22,12 @@ export interface PuppeteerConnection {
   transport: { close(): void };
 }
 
-/** Puppeteer's own commands (key events, back and forward, the first frame tree) wait this long, not its 180 s. */
-export const PROTOCOL_TIMEOUT_MS = 30_000;
+/**
+ * Puppeteer's commands wait this long, not its 180 s. It is a little over the longest budget a call can ask for
+ * (a navigation: 120 s, schemas.ts `timeoutMs`), because Puppeteer's `goto` rides on one `Page.navigate` command that
+ * answers only when the navigation commits. Key events are bounded on their own, much shorter (page-port.ts).
+ */
+export const PROTOCOL_TIMEOUT_MS = 125_000;
 /** Attaching, and connecting Puppeteer, each; the debugger is detached again when one does not finish. */
 export const CONNECT_TIMEOUT_MS = 20_000;
 /** Disconnecting; the transport is closed directly when Puppeteer does not finish. */
@@ -40,7 +44,7 @@ class DeadlineError extends Error {
  * Waits for `work` for at most `ms`. When it finishes only after the deadline, `discard` is given what it produced, so
  * a late result does not keep a debugger attached.
  */
-async function within<T>(work: Promise<T>, ms: number, what: string, discard: (late: T) => void): Promise<T> {
+export async function within<T>(work: Promise<T>, ms: number, what: string, discard: (late: T) => void): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let expired = false;
   const deadline = new Promise<never>((_, reject) => {

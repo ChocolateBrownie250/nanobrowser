@@ -5,8 +5,10 @@ import { z } from 'zod';
 const ref = z.string().min(1).max(64).describe('A ref from the latest observation, such as "e12"');
 
 // Upper bounds on what an agent may send, so one call cannot hold a tab's lock for minutes or fill the worker's memory.
-/** Text typed or set into a field. */
+/** Text typed key by key: every character holds the tab's lock, so the bound keeps one call from running for minutes. */
 const MAX_TEXT = 20_000;
+/** A value set into a field in one command (and the value an expectation compares), as large as a `read` returns. */
+const MAX_VALUE = 200_000;
 /** Names, roles, search strings, selectors and expectations. */
 const MAX_STRING = 2_000;
 /** An address (the common limit for a URL). */
@@ -16,7 +18,7 @@ const MAX_BASE64 = 35_000_000;
 const MAX_FIELDS = 50;
 
 /** The value of a field: text, a checkbox state, or the options chosen in a list. */
-const fieldValue = z.union([z.string().max(MAX_TEXT), z.boolean(), z.array(z.string().max(MAX_TEXT)).max(100)]);
+const fieldValue = z.union([z.string().max(MAX_VALUE), z.boolean(), z.array(z.string().max(MAX_VALUE)).max(100)]);
 
 export const RefTargetSchema = z.strictObject({ ref });
 export const SemanticTargetSchema = z.strictObject({
@@ -45,7 +47,7 @@ export const ExpectationSchema = z
     url: z.string().max(MAX_STRING).optional().describe('The page URL contains this text'),
     text: z.string().max(MAX_STRING).optional().describe('This text is on the page'),
     textGone: z.string().max(MAX_STRING).optional().describe('This text is no longer on the page'),
-    value: z.string().max(MAX_TEXT).optional().describe("The target's value equals this"),
+    value: z.string().max(MAX_VALUE).optional().describe("The target's value equals this"),
     checked: z.boolean().optional().describe('The target is checked (true) or unchecked (false)'),
     gone: z.boolean().optional().describe('The target is no longer in the page'),
   })
@@ -136,7 +138,7 @@ export const TypeArgsSchema = z.strictObject({
 
 export const PressArgsSchema = z.strictObject({
   ...actionCommon,
-  keys: z.string().min(1).describe('A key or chord, such as "Enter", "Escape" or "Control+A"'),
+  keys: z.string().min(1).max(MAX_STRING).describe('A key or chord, such as "Enter", "Escape" or "Control+A"'),
   target: TargetSchema.optional(),
 });
 
