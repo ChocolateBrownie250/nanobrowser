@@ -3,6 +3,7 @@
 // to say.
 import { anthropicKeyHeaders, openAICompatibleBaseUrl } from './providers';
 import type { ModelSpec } from './providers';
+import { withDeadline } from './errors';
 import type { LearntFacts } from './profiles';
 
 export type ApiFacts = Omit<LearntFacts, 'at'>;
@@ -86,13 +87,18 @@ export function factsFrom(record: Json): ApiFacts {
 export async function readModelInfo(
   spec: Pick<ModelSpec, 'kind' | 'modelName' | 'apiKey' | 'baseUrl'>,
   fetchFn: typeof fetch = fetch,
+  signal?: AbortSignal,
 ): Promise<ApiFacts | null> {
+  // Each request is bounded, and the caller's signal ends it sooner; a read that fails or times out says nothing.
   const get = async (url: string, init?: RequestInit): Promise<Json | null> => {
+    const deadline = withDeadline(30_000, signal);
     try {
-      const response = await fetchFn(url, init);
+      const response = await fetchFn(url, { ...init, signal: deadline.signal });
       return response.ok ? ((await response.json()) as Json) : null;
     } catch {
       return null;
+    } finally {
+      deadline.done();
     }
   };
   const { kind, modelName } = spec;

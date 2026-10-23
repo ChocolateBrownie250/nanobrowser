@@ -10,11 +10,11 @@ import {
   ZAI_MODELS,
 } from './providers';
 import type { CreateModelOptions, ModelSpec } from './providers';
-import { isOriginRefused } from './errors';
+import { bodyReason, isOriginRefused, withDeadline } from './errors';
 import { refusesImages, refusesReasoning, streamTurn } from './stream';
 import type { TurnRequest, TurnResult } from './stream';
 import type { LearntFacts } from './profiles';
-import { NOT_CHAT } from './catalogue';
+import { isCloudEndpoint, NOT_CHAT } from './catalogue';
 import type { WireEffort } from './catalogue';
 
 export interface ConnectionResult {
@@ -25,6 +25,8 @@ export interface ConnectionResult {
   /** A local server refused the extension's origin: show the OLLAMA_ORIGINS or CORS fix. */
   originRefused?: boolean;
   ms: number;
+  /** The provider's HTTP status when it refused the request (401 for a key it does not accept). */
+  status?: number;
   /** What the probes learnt, stored as the entry's `tested`; absent when they learnt nothing. */
   tested?: Omit<LearntFacts, 'at'>;
 }
@@ -39,7 +41,18 @@ export interface ProbeAsk {
   noneWire?: WireEffort;
   /** The model's vision is a guess: run the image probe. */
   image?: boolean;
+  /**
+   * The effort the tool probe and the image probe are sent at, through the same path a run's effort takes: Low's value
+   * for a model that cannot stop reasoning, which would otherwise think at its vendor's default (GLM's is its highest).
+   */
+  effort?: WireEffort;
 }
+
+/** Each probe's time: a cloud model answers a one-tool request well within it; a local server may be loading the model. */
+const PROBE_TIMEOUT_MS = 90_000;
+const LOCAL_PROBE_TIMEOUT_MS = 300_000;
+/** A model list, or one model's record. */
+const LIST_TIMEOUT_MS = 30_000;
 
 /** The tool probe's reply was cut short before a tool call. */
 export const CUT_SHORT =
@@ -70,23 +83,41 @@ export async function testConnection(
   spec: ModelSpec,
   options: CreateModelOptions = {},
   ask: ProbeAsk = {},
+  signal?: AbortSignal,
 ): Promise<ConnectionResult> {
   const probe: TurnRequest = {
     // Room for a model that reasons by default to think before it calls the tool.
-    chat: createModel({ ...spec, maxOutputTokens: 1024 }, options),
+    chat: createModel({ ...spec, maxOutputTokens: 2048 }, options),
     system: 'You are testing a tool connection. Call the tool report_status with status "ok". Do not write text.',
     messages: [{ role: 'user', content: 'Call report_status now.' }],
     tools: PROBE_TOOL,
     retry: { attempts: 1, baseMs: 0, maxMs: 0 },
   };
-  const result = await streamTurn(probe);
+  const local = spec.kind === 'ollama' || spec.kind === 'lmstudio' || spec.kind === 'openai-compatible';
+  // One probe, bounded: when the time runs out or the caller stops, the probe reports an error and learns nothing.
+  const probeMs = isCloudEndpoint(spec.kind, spec.baseUrl) ? PROBE_TIMEOUT_MS : LOCAL_PROBE_TIMEOUT_MS;
+  const run = async (request: Partial<TurnRequest>): Promise<TurnResult> => {
+    const deadline = withDeadline(probeMs, signal);
+    try {
+      const r = await streamTurn({ ...probe, ...request, signal: deadline.signal });
+      if (r.finish !== 'aborted') return r;
+      const message = deadline.timedOut()
+        ? `The model did not answer within ${Math.round(probeMs / 1000)} seconds.`
+        : 'The test was stopped.';
+      return { ...r, finish: 'error', error: { message, overflow: false, network: true, timeout: true } };
+    } finally {
+      deadline.done();
+    }
+  };
+  const result = await run(ask.effort ? { reasoning: ask.effort } : {});
   if (result.error) {
-    const local = spec.kind === 'ollama' || spec.kind === 'lmstudio' || spec.kind === 'openai-compatible';
     return {
       ok: false,
       toolCalling: false,
       error: result.error.message,
-      originRefused: local && (result.error.status === 403 || result.error.status === undefined),
+      originRefused:
+        local && !result.error.timeout && (result.error.status === 403 || result.error.status === undefined),
+      ...(result.error.status !== undefined ? { status: result.error.status } : {}),
       ms: result.durationMs,
     };
   }
@@ -97,7 +128,7 @@ export async function testConnection(
     return { ok: false, toolCalling: false, error: CUT_SHORT, ms: result.durationMs };
   }
   const tested: Omit<LearntFacts, 'at'> = {};
-  const once = (request: Partial<TurnRequest>) => streamTurn({ ...probe, ...request, fallback: false });
+  const once = (request: Partial<TurnRequest>) => run({ ...request, fallback: false });
   const refused = (r: TurnResult) => !!r.error && refusesReasoning(r.error.status, r.error.message);
 
   // The effort probe: Low, then Medium, then High, to the first accepted. "Reasons: no" only when all are refused,
@@ -124,6 +155,7 @@ export async function testConnection(
   // The image probe, for a model whose vision is a guess.
   if (ask.image) {
     const r = await once({
+      ...(ask.effort ? { reasoning: ask.effort } : {}),
       tools: undefined,
       system: 'Answer in one word.',
       messages: [
@@ -140,6 +172,7 @@ export async function testConnection(
     else if (!r.error) tested.vision = true;
   }
 
+  if (signal?.aborted) return { ok: false, toolCalling: false, error: 'The test was stopped.', ms: result.durationMs };
   return { ok: true, toolCalling, ms: result.durationMs, ...(Object.keys(tested).length ? { tested } : {}) };
 }
 
@@ -171,24 +204,42 @@ function hiddenEntry(name: string, m: ListEntry): boolean {
 export async function listModels(
   spec: Pick<ModelSpec, 'kind' | 'apiKey' | 'baseUrl'>,
   fetchFn: typeof fetch = fetch,
+  signal?: AbortSignal,
 ): Promise<ModelList> {
   const get = async (url: string, headers: Record<string, string> = {}) => {
-    let response: Response;
+    const host = new URL(url).host;
+    const deadline = withDeadline(LIST_TIMEOUT_MS, signal);
     try {
-      response = await fetchFn(url, { headers });
-    } catch (error) {
-      throw Object.assign(new Error(`Could not reach ${new URL(url).host}`), { originRefused: isOriginRefused(error) });
+      let response: Response;
+      try {
+        response = await fetchFn(url, { headers, signal: deadline.signal });
+      } catch (error) {
+        if (deadline.timedOut()) {
+          throw Object.assign(new Error(`${host} did not answer within ${LIST_TIMEOUT_MS / 1000} seconds`), {
+            originRefused: false,
+          });
+        }
+        if (signal?.aborted) throw Object.assign(new Error('Stopped'), { originRefused: false });
+        throw Object.assign(new Error(`Could not reach ${host}`), { originRefused: isOriginRefused(error) });
+      }
+      if (!response.ok) {
+        // The provider's own reason when its body has one (`{ error: { message } }`, or Z.ai's `{ msg }`), else the
+        // status line.
+        const reason = bodyReason(await response.text().catch(() => '')) ?? response.statusText;
+        throw Object.assign(new Error(`${response.status} ${reason}`.trim()), {
+          status: response.status,
+          originRefused: response.status === 403,
+        });
+      }
+      // A 200 that is not a JSON object (a proxy's or portal's page) is not a model list.
+      const body = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        throw Object.assign(new Error(`Unexpected answer from ${host}`), { originRefused: false });
+      }
+      return body;
+    } finally {
+      deadline.done();
     }
-    if (!response.ok) {
-      // The provider's own reason when its body has one (`{ error: { message } }`), else the status line.
-      const body = (await response.json().catch(() => null)) as { error?: { message?: unknown } } | null;
-      const reason = typeof body?.error?.message === 'string' ? body.error.message : response.statusText;
-      throw Object.assign(new Error(`${response.status} ${reason}`.trim()), {
-        status: response.status,
-        originRefused: response.status === 403,
-      });
-    }
-    return response.json() as Promise<Record<string, unknown>>;
   };
   let entries: Array<[string, ListEntry]>;
   switch (spec.kind) {
@@ -199,8 +250,19 @@ export async function listModels(
         'anthropic-dangerous-direct-browser-access': 'true',
       });
       entries = ((body.data as ListEntry[]) ?? []).map(m => [String(m.id), m]);
-      // Z.ai may answer the list with a status body instead of models: its Coding Plan models stand in.
-      if (!entries.length && isZai(spec.baseUrl)) entries = ZAI_MODELS.map(name => [name, {}]);
+      // Z.ai may answer the list with a status body instead of models: its Coding Plan models stand in. A status body
+      // that says it failed (`success: false`, or a code other than 200) is an error, not a list.
+      if (!entries.length && isZai(spec.baseUrl)) {
+        const code = body.code === undefined || body.code === null || body.code === '' ? undefined : Number(body.code);
+        if (body.success === false || (code !== undefined && code !== 200)) {
+          const reason = typeof body.msg === 'string' && body.msg.trim() ? body.msg.trim() : 'The list request failed';
+          throw Object.assign(new Error(`${code ?? ''} ${reason}`.trim()), {
+            ...(code !== undefined && Number.isFinite(code) ? { status: code } : {}),
+            originRefused: false,
+          });
+        }
+        entries = ZAI_MODELS.map(name => [name, {}]);
+      }
       break;
     }
     case 'gemini': {
@@ -263,11 +325,14 @@ export async function detectContext(
 ): Promise<number | undefined> {
   const root = (openAICompatibleBaseUrl(spec.kind, spec.baseUrl) ?? '').replace(/\/v1$/, '');
   const json = async (url: string, init?: RequestInit) => {
+    const deadline = withDeadline(LIST_TIMEOUT_MS);
     try {
-      const response = await fetchFn(url, init);
+      const response = await fetchFn(url, { ...init, signal: deadline.signal });
       return response.ok ? ((await response.json()) as Record<string, unknown>) : null;
     } catch {
       return null;
+    } finally {
+      deadline.done();
     }
   };
   const positive = (n: unknown) => (typeof n === 'number' && n > 0 ? n : undefined);

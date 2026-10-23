@@ -49,6 +49,7 @@ export function ModelMenu({
   running,
   onModel,
   onReasoning,
+  defaultOpen = false,
 }: {
   models: ModelChoice[];
   model: ModelRef | null;
@@ -57,8 +58,10 @@ export function ModelMenu({
   running: boolean;
   onModel: (model: ModelRef) => void;
   onReasoning: (reasoning: ReasoningEffort) => void;
+  /** For tests, which render to static markup: the menu starts open. */
+  defaultOpen?: boolean;
 }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(defaultOpen);
   const root = useRef<HTMLDivElement>(null);
   const button = useRef<HTMLButtonElement>(null);
   const chosen = models.find(m => sameRef(model, m.ref));

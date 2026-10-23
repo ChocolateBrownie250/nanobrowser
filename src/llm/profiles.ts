@@ -112,17 +112,24 @@ export function resolveProfile(input: ProfileInput): ModelProfile {
 
 /**
  * What Test models's probes still need to find out: whether None is accepted, for a model that reasons or may, with
- * None's value through the row's map; and whether the model sees images, when that is a guess.
+ * None's value through the row's map; whether the model sees images, when that is a guess; and the effort to send
+ * the other probes at, for a model that cannot stop reasoning.
  */
 export function probeAsk(input: ProfileInput): {
   reasons?: boolean;
   none: boolean;
   noneWire?: WireEffort;
+  effort?: WireEffort;
   image: boolean;
 } {
   const { row, reasons, acceptsNone, visionStated } = reasoningFacts(input);
+  // A model that cannot stop reasoning thinks at its vendor's default (GLM's is its highest), so the probes that learn
+  // nothing about effort are sent at Low's value, as a run's Low would be.
+  const profile = resolveProfile(input);
+  const effort = profile.reasoning === 'always' ? wireEffort(profile, 'low') : undefined;
   return {
     ...(reasons !== undefined ? { reasons } : {}),
+    ...(effort ? { effort } : {}),
     none: reasons !== false && acceptsNone === undefined,
     ...(row?.wire?.none ? { noneWire: row.wire.none } : {}),
     image: !visionStated,

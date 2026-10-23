@@ -67,9 +67,24 @@ function kindInfo(kind: ProviderKind) {
   return KINDS.find(k => k.kind === kind)!;
 }
 
+/**
+ * The addresses presets had in earlier versions. A provider saved from one is still that preset, a cloud service that
+ * needs a key, although the preset now points elsewhere (Z.ai's Coding Plan was added as an OpenAI-compatible provider
+ * at its chat-completions address). Such providers are not rewritten to the new kind and address: they keep working as
+ * they were saved, and the user can add the preset again.
+ */
+export const LEGACY_PRESET_URLS: readonly string[] = ['https://api.z.ai/api/coding/paas/v4'];
+
+const sameAddress = (a: string | undefined, b: string) => !!a && a.replace(/\/+$/, '') === b.replace(/\/+$/, '');
+
+/** Whether a provider's address is a preset's, current or from an earlier version. */
+export function isPresetAddress(baseUrl: string | undefined): boolean {
+  return [...PRESETS.map(p => p.baseUrl), ...LEGACY_PRESET_URLS].some(url => sameAddress(baseUrl, url));
+}
+
 /** Whether a provider needs a key: its kind does, or it is a preset, a cloud service that always does. */
-function needsKey(provider: ProviderConfig): boolean {
-  return kindInfo(provider.kind).needsKey || PRESETS.some(p => p.baseUrl === provider.baseUrl);
+export function needsKey(provider: Pick<ProviderConfig, 'kind' | 'baseUrl'>): boolean {
+  return kindInfo(provider.kind).needsKey || isPresetAddress(provider.baseUrl);
 }
 
 function updateProvider(id: string, patch: Partial<ProviderConfig>): Promise<void> {

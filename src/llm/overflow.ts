@@ -21,6 +21,9 @@ const OVERFLOW_PATTERNS: RegExp[] = [
   /token limit (exceeded|reached)/i,
   /request too large/i,
   /exceeds the limit of \d+ tokens/i,
+  /prompt exceeds max(imum)? length/i, // Z.ai (code 1261)
+  /exceeds max(imum)? (input )?length/i, // Z.ai
+  /"code"\s*:\s*"?1261"?\b/, // Z.ai's code for it
 ];
 
 /** Whether a provider's error says the request was too large for the model's context. */

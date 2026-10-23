@@ -5,7 +5,9 @@ import { createAnthropic } from '@ai-sdk/anthropic';
 import { createGoogle } from '@ai-sdk/google';
 import { createOpenAI } from '@ai-sdk/openai';
 import type { LanguageModel } from 'ai';
+import { isCloudEndpoint } from './catalogue';
 import type { WireEffort } from './catalogue';
+import { ModelTimeoutError } from './errors';
 
 export type ProviderKind =
   'anthropic' | 'openai' | 'gemini' | 'openai-compatible' | 'ollama' | 'lmstudio' | 'openrouter';
@@ -69,14 +71,15 @@ export function anthropicKeyHeaders(apiKey: string | undefined, baseUrl?: string
 
 /**
  * Z.ai's GLM effort, sent as `output_config.effort`. Its endpoint varies GLM's thinking only by that field and ignores
- * `thinking.budget_tokens`, which the SDK would otherwise send for a model it does not know. GLM's levels are low, high
- * and max (the catalogue maps the picker to them). The SDK's effort has no `minimal`; None keeps the SDK's disabled
- * thinking.
+ * `thinking.budget_tokens`, which the SDK would otherwise send for a model it does not know. Z.ai documents three
+ * levels, low, high and max (the catalogue maps the picker to them for GLM-5.3), so any other value is clamped to the
+ * nearest: minimal to low, medium to high, xhigh to max. None keeps the SDK's disabled thinking.
  */
+const ZAI_EFFORTS = { minimal: 'low', low: 'low', medium: 'high', high: 'high', xhigh: 'max', max: 'max' } as const;
+
 function zaiReasoningOptions(reasoning: WireEffort): ProviderOptions | undefined {
   if (reasoning === 'none') return undefined;
-  const effort = reasoning === 'minimal' ? 'low' : reasoning;
-  return { anthropic: { cacheControl: { type: 'ephemeral' }, effort } };
+  return { anthropic: { cacheControl: { type: 'ephemeral' }, effort: ZAI_EFFORTS[reasoning] } };
 }
 
 export const DEFAULT_BASE_URLS: Partial<Record<ProviderKind, string>> = {
@@ -110,9 +113,37 @@ export function openAICompatibleBaseUrl(kind: ProviderKind, baseUrl?: string): s
   return url;
 }
 
+/**
+ * How long a model call may stay silent: until the server answers and sends its first output, and between outputs once
+ * it has started. Generous, since a reasoning model can think a long time before it writes, and a local server loading
+ * a model can take longer still.
+ */
+export function modelTimeouts(spec: Pick<ModelSpec, 'kind' | 'baseUrl'>): { firstChunkMs: number; chunkMs: number } {
+  return isCloudEndpoint(spec.kind, spec.baseUrl)
+    ? { firstChunkMs: 180_000, chunkMs: 120_000 }
+    : { firstChunkMs: 600_000, chunkMs: 300_000 };
+}
+
+/**
+ * A fetch that gives up when the server has not sent its response headers within `ms`. The AI SDK's own first-output
+ * timeout starts only once the response has arrived, so a connection that is accepted and never answered needs this.
+ * The caller's abort signal still ends the request, and keeps ending it while the body streams.
+ */
+export function withHeaderTimeout(base: typeof fetch | undefined, ms: number): typeof fetch {
+  return (input, init) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(new ModelTimeoutError(Math.round(ms / 1000), false)), ms);
+    const outer = init?.signal;
+    if (outer?.aborted) controller.abort(outer.reason);
+    else outer?.addEventListener('abort', () => controller.abort(outer.reason), { once: true });
+    const send = base ?? ((i, n) => globalThis.fetch(i, n));
+    return send(input, { ...init, signal: controller.signal }).finally(() => clearTimeout(timer));
+  };
+}
+
 export function createModel(spec: ModelSpec, options: CreateModelOptions = {}): ChatModel {
   const { kind, modelName, apiKey } = spec;
-  const fetch = options.fetch;
+  const fetch = withHeaderTimeout(options.fetch, modelTimeouts(spec).firstChunkMs);
   switch (kind) {
     case 'anthropic': {
       const anthropic = createAnthropic({

@@ -206,7 +206,6 @@ export function usableModel(
   return null;
 }
 
-/** Whether a configured model reasons: what Test models learnt, else the catalogue. */
 /** The model's profile from its provider entry and what was learnt about it, or undefined when it is not configured. */
 function profileOf(providers: ProviderConfig[], ref: ModelRef | null | undefined) {
   const found = findModel(providers, ref);
@@ -219,6 +218,7 @@ function profileOf(providers: ProviderConfig[], ref: ModelRef | null | undefined
   });
 }
 
+/** Whether a configured model reasons: what Test models learnt, else the catalogue. */
 export function capabilityOf(
   providers: ProviderConfig[],
   ref: ModelRef | null | undefined,
