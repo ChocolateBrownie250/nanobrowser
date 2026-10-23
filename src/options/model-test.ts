@@ -46,7 +46,11 @@ export async function testModel(
   const api = await readModelInfo(spec, undefined, signal);
   // Only a read that gave facts is stored: a failed one must not wipe what an earlier read learnt.
   const patch: ModelTest['patch'] = api ? { fromApi: { ...api, at } } : {};
-  if (provider.kind === 'ollama' || provider.kind === 'lmstudio') patch.detectedContext = await detectContext(spec);
+  // The same rule for the loaded context window: a server that did not say leaves the stored value alone.
+  if (provider.kind === 'ollama' || provider.kind === 'lmstudio') {
+    const detected = await detectContext(spec);
+    if (detected !== undefined) patch.detectedContext = detected;
+  }
   if (!whole) return { patch };
   // The probes ask only what no source said: the stored overrides and answers, and what the API said just now (or,
   // when it said nothing, last time).
@@ -71,7 +75,7 @@ export async function testModel(
  * some. The old `reasoningSupport` field goes.
  */
 export async function saveTest(providerId: string, baseUrl: string | undefined, modelName: string, test: ModelTest) {
-  const { tested, fromApi, ...rest } = test.patch;
+  const { tested, fromApi, detectedContext, ...rest } = test.patch;
   await providersStorage.set(list =>
     list.map(p =>
       p.id !== providerId || (p.baseUrl ?? '') !== (baseUrl ?? '')
@@ -87,7 +91,13 @@ export async function saveTest(providerId: string, baseUrl: string | undefined, 
                 tested && Object.keys(tested).length
                   ? { ...m.tested, ...tested, at: new Date().toISOString() }
                   : m.tested;
-              return { ...kept, ...rest, ...(fromApi ? { fromApi } : {}), ...(merged ? { tested: merged } : {}) };
+              return {
+                ...kept,
+                ...rest,
+                ...(fromApi ? { fromApi } : {}),
+                ...(detectedContext !== undefined ? { detectedContext } : {}),
+                ...(merged ? { tested: merged } : {}),
+              };
             }),
           },
     ),

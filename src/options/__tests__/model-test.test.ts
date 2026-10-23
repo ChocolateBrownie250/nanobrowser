@@ -136,6 +136,39 @@ describe('a failed read of the model’s API', () => {
   });
 });
 
+describe('a failed read of a local server’s loaded context window', () => {
+  const local = (models: ProviderConfig['models']): ProviderConfig => ({
+    id: 'p2',
+    kind: 'ollama',
+    name: 'Ollama',
+    baseUrl: 'http://localhost:11434',
+    models,
+  });
+  const stored = { name: 'qwen3:8b', detectedContext: 8192 };
+
+  it('leaves no value in the patch, and the stored one stays', async () => {
+    const data = stubStorage([local([stored])]);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('', { status: 500 })),
+    );
+    const test = await testModel(local([stored]), 'qwen3:8b', '', false);
+    expect(test.patch).not.toHaveProperty('detectedContext');
+    await providersStorage.get();
+    await saveTest('p2', 'http://localhost:11434', 'qwen3:8b', test);
+    const [provider] = data['nb.providers'] as ProviderConfig[];
+    expect(provider.models[0].detectedContext).toBe(8192);
+  });
+
+  it('even a patch that names it as undefined does not wipe it', async () => {
+    const data = stubStorage([local([stored])]);
+    await providersStorage.get();
+    await saveTest('p2', 'http://localhost:11434', 'qwen3:8b', { patch: { detectedContext: undefined } });
+    const [provider] = data['nb.providers'] as ProviderConfig[];
+    expect(provider.models[0].detectedContext).toBe(8192);
+  });
+});
+
 describe('which providers are presets', () => {
   it('a preset’s current address needs a key', () => {
     expect(needsKey({ kind: 'anthropic', baseUrl: ZAI_ANTHROPIC_BASE_URL })).toBe(true);

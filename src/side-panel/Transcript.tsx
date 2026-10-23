@@ -273,6 +273,7 @@ const ItemView = memo(function ItemView({
   actions?: MessageActions;
   retry: boolean;
 }) {
+  useLanguage();
   if (item.kind === 'user')
     return (
       <UserMessage
@@ -449,6 +450,7 @@ const RunView = memo(function RunView({
   live?: { waiting: boolean };
   settled: boolean;
 }) {
+  useLanguage();
   const { replies, opened, start } = item;
   const rows: ToolRow[] = runRows(
     replies.flatMap(r => r.tools),

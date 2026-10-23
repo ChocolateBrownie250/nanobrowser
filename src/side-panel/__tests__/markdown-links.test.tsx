@@ -5,6 +5,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { createRoot } from 'react-dom/client';
 import type { Root } from 'react-dom/client';
 import { act } from 'react';
+import { setLanguage, t } from '@src/ui/i18n';
 import { Markdown, toCsv } from '../Markdown';
 
 const IMAGE_IN_LINK = '[![chart](https://img.example/p.png)](https://evil.example/go)';
@@ -65,12 +66,46 @@ describe('an image inside a link', () => {
   });
 });
 
+describe('a settled answer and the language', () => {
+  let host: HTMLElement;
+  let root: Root;
+  beforeEach(() => {
+    host = document.createElement('div');
+    document.body.append(host);
+    root = createRoot(host);
+  });
+  afterEach(async () => {
+    act(() => root.unmount());
+    host.remove();
+    await act(async () => setLanguage('en'));
+  });
+
+  it('shows the labels of its tables in the new language without being re-rendered by its parent', async () => {
+    // One element, rendered once: only a subscription of the component itself can follow the language.
+    const answer = <Markdown text={'| a | b |\n| - | - |\n| 1 | 2 |'} />;
+    act(() => root.render(answer));
+    expect(host.textContent).toContain(t('markdown.saveCsv'));
+    const english = t('markdown.saveCsv');
+    await act(async () => setLanguage('zh_CN'));
+    expect(t('markdown.saveCsv')).not.toBe(english);
+    expect(host.textContent).toContain(t('markdown.saveCsv'));
+    expect(host.textContent).not.toContain(english);
+  });
+});
+
 describe('toCsv', () => {
   it.each(['=', '+', '-', '@', '\t', '\r'])('neutralises a cell that starts with %j', lead => {
     const cell = `${lead}SUM(A1)`;
     const csv = toCsv([[cell, 'b']]);
     expect(csv.startsWith(`'${lead}`) || csv.startsWith(`"'${lead}`)).toBe(true);
     expect(csv.endsWith(',b')).toBe(true);
+  });
+
+  it('keeps a plain signed number, and still neutralises anything with an operator or a name in it', () => {
+    expect(toCsv([['-5', '+1.5', '-3.2%', '-1,5']])).toBe('-5,+1.5,-3.2%,"-1,5"');
+    expect(toCsv([['-A1', '=1+1', '-1+1', '+3-2', "+cmd|' /C calc'!A0"]])).toBe(
+      "'-A1,'=1+1,'-1+1,'+3-2,'+cmd|' /C calc'!A0",
+    );
   });
 
   it('prefixes before quoting, and leaves ordinary cells alone', () => {

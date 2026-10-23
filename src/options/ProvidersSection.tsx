@@ -603,6 +603,8 @@ function DraftField({
         value={draft ?? saved}
         onChange={e => setDraft(e.target.value)}
         onKeyDown={e => {
+          // Enter and Esc of an input method pick a candidate or close the list; they are not the field's.
+          if (e.nativeEvent.isComposing || e.keyCode === 229) return;
           if (e.key === 'Enter' && changed) save();
           else if (e.key === 'Escape' && draft !== null) {
             e.stopPropagation();
@@ -681,6 +683,8 @@ function KeyField({
         value={draft}
         onChange={setDraft}
         onKeyDown={e => {
+          // Enter and Esc of an input method pick a candidate or close the list; they are not the field's.
+          if (e.nativeEvent.isComposing || e.keyCode === 229) return;
           if (e.key === 'Enter') save();
           else if (e.key === 'Escape' && draft) {
             e.stopPropagation();

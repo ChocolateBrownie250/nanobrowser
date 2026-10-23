@@ -7,7 +7,7 @@ import ReactMarkdown from 'react-markdown';
 import type { Components, Options } from 'react-markdown';
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import remarkGfm from 'remark-gfm';
-import { t } from '@src/ui/i18n';
+import { t, useLanguage } from '@src/ui/i18n';
 
 const SCHEMES = new Set(['http:', 'https:', 'mailto:']);
 
@@ -117,10 +117,11 @@ function tableRows(node: HTMLTableElement | null): string[][] {
 
 /**
  * A cell as CSV. One that starts with = + - @ or a tab or carriage return would be a formula when a spreadsheet opens
- * the file, so it gets a leading apostrophe (the spreadsheet then shows it as text).
+ * the file, so it gets a leading apostrophe (the spreadsheet then shows it as text). A plain signed number (-3.2%,
+ * +1,5) holds nothing to evaluate and keeps its value.
  */
 function csvCell(cell: string): string {
-  const text = /^[=+\-@\t\r]/.test(cell) ? `'${cell}` : cell;
+  const text = /^[=+\-@\t\r]/.test(cell) && !/^[+-]\d[\d.,]*%?$/.test(cell) ? `'${cell}` : cell;
   return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
@@ -258,8 +259,12 @@ const REMARK_PLUGINS = [remarkGfm];
 const REHYPE_PLUGINS: NonNullable<Options['rehypePlugins']> = [[rehypeSanitize, schema]];
 const urlTransform = (url: string) => safeUrl(url);
 
-/** Memoised on its text: a settled answer is not parsed again while a later one streams. */
+/**
+ * Memoised on its text: a settled answer is not parsed again while a later one streams. It still follows the language
+ * (the labels of its tables and images), which is not a prop.
+ */
 export const Markdown = memo(function Markdown({ text }: { text: string }) {
+  useLanguage();
   return (
     <div className="nb-markdown">
       <ReactMarkdown
