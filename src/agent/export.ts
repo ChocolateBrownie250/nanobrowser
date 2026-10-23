@@ -4,6 +4,7 @@ import type { Conversation, Entry } from '@src/store/types';
 import type { ToolRow } from '@src/ui/protocol';
 import { runRows } from '@src/ui/protocol';
 import { toDisplay } from './display';
+import { safeHead } from './safe-text';
 
 const ICON: Record<ToolRow['status'], string> = { running: '…', done: '✓', failed: '✗', skipped: '–', waiting: '!' };
 
@@ -13,11 +14,13 @@ function stamp(at: string): string {
 
 /** A file name from the title: letters, digits and spaces, at most 60 characters. */
 export function exportName(conversation: Conversation): string {
-  const base = (conversation.title || 'conversation')
-    .replace(/[^\p{L}\p{N} _-]+/gu, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 60);
+  const base = safeHead(
+    (conversation.title || 'conversation')
+      .replace(/[^\p{L}\p{N} _-]+/gu, ' ')
+      .replace(/\s+/g, ' ')
+      .trim(),
+    60,
+  ).trim();
   return `${base || 'conversation'}.md`;
 }
 

@@ -1,6 +1,8 @@
 // The system prompt. Short and stable, so the prompt prefix stays cached:
 // the page header is the only part of a request that changes every turn.
 import { CUSTOM_INSTRUCTIONS_MAX } from '@src/store/types';
+import { safeHead } from './safe-text';
+
 export interface PromptOptions {
   /** Answer in this language; 'auto' follows the user's message. */
   responseLanguage?: string;
@@ -90,7 +92,7 @@ function toolGuide(tools: string[]): string {
 /** The agent's prompt. */
 export function agentSystemPrompt(options: PromptOptions = {}): string {
   const sections = [ROLE, CONTRACT, PERMISSIONS, toolGuide(options.tools ?? [])];
-  const custom = options.customInstructions?.trim().slice(0, CUSTOM_INSTRUCTIONS_MAX).trim();
+  const custom = safeHead(options.customInstructions?.trim() ?? '', CUSTOM_INSTRUCTIONS_MAX).trim();
   if (custom) {
     // The user's own words, from Settings → Memory; no tool writes them.
     sections.push(

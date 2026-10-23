@@ -2,7 +2,7 @@
 // by the action ledger, written by code, and a summary written by the model. The user's
 // messages and the `ask_user` exchanges of that part are kept, in order. One cumulative
 // `compaction` entry stores the ledger and the summary, so a restart builds the same context.
-import { cutText, quote } from '@src/browser-control';
+import { cutText } from '@src/browser-control';
 import { streamTurn } from '@src/llm';
 import type { ModelMessage } from '@src/llm';
 import { activeBranch, appendEntry, putEntry } from '@src/store/conversations';
@@ -12,6 +12,7 @@ import { NOTE_LABEL, note } from './records';
 import { CONTRACT } from './prompt';
 import { learnFrom, turnEffort } from './run';
 import type { ResolvedModel } from './run';
+import { agentQuote as quote, defuseQuotes, safeHead } from './safe-text';
 
 type MessageEntry = EntryOf<'message'>;
 
@@ -128,7 +129,7 @@ export function ledgerLines(groups: Unit[], turns: Map<string, number>): LedgerL
       const r = out.result;
       const tabId = r?.page?.tabId ?? (typeof args.tabId === 'number' ? args.tabId : undefined);
       const tab = tabId !== undefined ? `tab ${tabId} · ` : '';
-      const target = r?.receipt?.target ? ` ${r.receipt.target}` : '';
+      const target = r?.receipt?.target ? ` ${defuseQuotes(r.receipt.target)}` : '';
       const base = { turn, tabId, toolCallId: p.toolCallId };
       const code = r?.error?.code ?? (out.isError ? /^error (\w+)/.exec(out.text)?.[1] : undefined);
       if (code === 'USER_STEP' || out.text.startsWith('hand-over:') || /\nhand-over:/.test(out.text)) {
@@ -196,34 +197,45 @@ export function ledgerLines(groups: Unit[], turns: Map<string, number>): LedgerL
 }
 
 /**
- * The merge rule: past 10% of the window, the oldest lines for reads and moves become one count per tab. Writes,
- * hand-overs, declines, blocks, files and unverified actions are never merged.
+ * The merge rule: past 10% of the window, the oldest lines for reads, visits and ordinary actions (clicks, typing,
+ * scrolling, opening tabs) become one count per tab. Writes, hand-overs, declines, blocks, files and unverified
+ * actions are never merged. When that is still not enough, the oldest counts are dropped, so the ledger the context
+ * always keeps stays within its budget as long as only these immortal lines are left over it.
  */
 export function mergeLedger(lines: LedgerLine[], maxChars: number, unverified: ReadonlySet<string>): LedgerLine[] {
-  const size = (l: LedgerLine[]) => l.reduce((n, x) => n + x.text.length + 12, 0);
-  if (size(lines) <= maxChars) return lines;
+  const cost = (l: LedgerLine) => l.text.length + 12;
+  const size = (l: LedgerLine[]) => l.reduce((n, x) => n + cost(x), 0);
+  let total = size(lines);
+  if (total <= maxChars) return lines;
   const mergeable = (l: LedgerLine) =>
-    (l.kind === 'read' || l.kind === 'visit' || l.kind === 'merged') && !(l.toolCallId && unverified.has(l.toolCallId));
-  const out = [...lines];
+    (l.kind === 'read' || l.kind === 'visit' || l.kind === 'action' || l.kind === 'merged') &&
+    !(l.toolCallId && unverified.has(l.toolCallId));
+  // What a count line costs, so the counts themselves are part of the budget.
+  const COUNT_LINE = 60;
+  const out: LedgerLine[] = [];
   const counts = new Map<string, { n: number; turn: number }>();
-  for (let i = 0; i < out.length && size(out) > maxChars;) {
-    const l = out[i];
-    if (!mergeable(l)) {
-      i++;
+  let countCost = 0;
+  for (const l of lines) {
+    if (!mergeable(l) || total + countCost <= maxChars) {
+      out.push(l);
       continue;
     }
     const key = String(l.tabId ?? '?');
     const n = l.kind === 'merged' ? Number(/^(\d+)/.exec(l.text.split(': ')[1] ?? '')?.[1] ?? 1) : 1;
-    const c = counts.get(key) ?? { n: 0, turn: l.turn };
-    counts.set(key, { n: c.n + n, turn: Math.max(c.turn, l.turn) });
-    out.splice(i, 1);
+    const c = counts.get(key);
+    if (!c) countCost += COUNT_LINE;
+    counts.set(key, { n: (c?.n ?? 0) + n, turn: Math.max(c?.turn ?? 0, l.turn) });
+    total -= cost(l);
   }
-  const merged: LedgerLine[] = [...counts].map(([tab, c]) => ({
+  let merged: LedgerLine[] = [...counts].map(([tab, c]) => ({
     turn: c.turn,
     tabId: tab === '?' ? undefined : Number(tab),
     kind: 'merged',
     text: `tab ${tab}: ${c.n} earlier reads and moves`,
   }));
+  // Last resort: the oldest counts go first.
+  merged.sort((a, b) => a.turn - b.turn);
+  while (merged.length && size(merged) + size(out) > maxChars) merged = merged.slice(1);
   return [...merged, ...out];
 }
 
@@ -363,7 +375,7 @@ export function planCompaction(
 }
 
 /** Renders units as plain text for the summary call: the summarising call has no tools. */
-function transcript(units: Unit[]): string {
+function transcriptLines(units: Unit[]): string[] {
   const lines: string[] = [];
   for (const unit of units) {
     for (const e of unit.entries) {
@@ -377,7 +389,34 @@ function transcript(units: Unit[]): string {
       }
     }
   }
-  return lines.join('\n');
+  return lines;
+}
+
+/** The share of the window the summary request may fill with its input, so the request itself cannot overflow. */
+const SUMMARY_INPUT_SHARE = 0.6;
+
+/**
+ * The transcript within `maxChars`: the newest lines that fit, headed by a line that says earlier ones were left out.
+ * The older steps are in the ledger either way.
+ */
+export function transcript(units: Unit[], maxChars: number): string {
+  const lines = transcriptLines(units);
+  if (lines.reduce((n, l) => n + l.length + 1, 0) <= maxChars) return lines.join('\n');
+  const OMITTED = '[extension] Older steps are left out of this transcript to fit the model; they are in the ledger.';
+  const kept: string[] = [];
+  let left = Math.max(0, maxChars - OMITTED.length - 1);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i];
+    if (line.length + 1 <= left) {
+      kept.push(line);
+      left -= line.length + 1;
+      continue;
+    }
+    // One line larger than what is left: its start, if enough room is left to be of use.
+    if (left > 200) kept.push(`${safeHead(line, left - 1)}…`);
+    break;
+  }
+  return [OMITTED, ...kept.reverse()].join('\n');
 }
 
 const SUMMARY_SYSTEM = `You write the working notes of a browser agent: a summary of earlier work, so the agent can continue after older steps leave its context.
@@ -403,25 +442,41 @@ export async function summarise(
   units: Unit[],
   previous: string | null,
   signal?: AbortSignal,
+  window: number = model.profile.contextWindow,
 ): Promise<string | null> {
+  const previousPart = previous ? `Your earlier summary:\n<agent-notes>\n${previous}\n</agent-notes>` : '';
+  const closing = note('write the summary now, in the four sections.');
+  // The input is the newest part of the old steps that fits 60% of the window, less the system prompt and the rest.
+  const room =
+    Math.floor(window * 4 * SUMMARY_INPUT_SHARE) - SUMMARY_SYSTEM.length - previousPart.length - closing.length;
   const parts = [
-    previous ? `Your earlier summary:\n<agent-notes>\n${previous}\n</agent-notes>` : '',
-    `The earlier steps to summarise:\n${transcript(units)}`,
-    note('write the summary now, in the four sections.'),
+    previousPart,
+    `The earlier steps to summarise:\n${transcript(units, Math.max(2_000, room))}`,
+    closing,
   ].filter(Boolean);
   const messages: ModelMessage[] = [{ role: 'user', content: [{ type: 'text', text: parts.join('\n\n') }] }];
-  // The summary is written at None (Low for a model that always reasons).
-  const reply = await streamTurn({
-    chat: model.chat,
-    system: SUMMARY_SYSTEM,
-    messages,
-    maxOutputTokens: Math.min(2_000, Math.floor(model.profile.contextWindow / 8)),
-    ...turnEffort(model, 'none'),
-    signal,
-  });
-  learnFrom(model, reply);
-  const text = reply.error ? '' : reply.text.trim();
-  return text && !text.startsWith(NOTE_LABEL) ? text : null;
+  // The summary is written at None (Low for a model that always reasons). A summary the output limit cut, or none at
+  // all (the model spent its allowance reasoning), is asked for once more with a larger allowance, never above the
+  // share of the window the output may take; a summary cut twice is not used.
+  const first = Math.min(2_000, Math.floor(window / 8));
+  const second = Math.min(8_000, Math.floor(window / 8));
+  for (const maxOutputTokens of second > first ? [first, second] : [first]) {
+    const reply = await streamTurn({
+      chat: model.chat,
+      system: SUMMARY_SYSTEM,
+      messages,
+      maxOutputTokens,
+      ...turnEffort(model, 'none'),
+      signal,
+    });
+    learnFrom(model, reply);
+    if (reply.finish === 'aborted' || signal?.aborted) return null;
+    if (reply.error) return null;
+    const text = reply.text.trim();
+    if (reply.finish !== 'length' && text) return text.startsWith(NOTE_LABEL) ? null : text;
+    if (reply.finish === 'length' && maxOutputTokens === second) return null;
+  }
+  return null;
 }
 
 export interface CompactionResult {
@@ -469,7 +524,9 @@ export async function runCompaction(options: {
     ),
   ];
   const ledger = mergeLedger(lines, window * 4 * 0.1, unverified);
-  const written = await summarise(model, plan.old, previous?.summary ?? null, options.signal).catch(() => null);
+  const written = await summarise(model, plan.old, previous?.summary ?? null, options.signal, window).catch(() => null);
+  // Stop pressed during the summary call is not a failed summary: nothing is committed, and the old steps stay.
+  if (options.signal?.aborted) return null;
   const entry = await appendEntry(conversationId, {
     type: 'compaction',
     ledger,

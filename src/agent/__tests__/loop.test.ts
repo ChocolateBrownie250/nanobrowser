@@ -6,7 +6,7 @@ import type { ScriptedReply } from '@src/llm';
 import { activeBranch, appendEntry, createConversation } from '@src/store/conversations';
 import { closeDb } from '@src/store/db';
 import type { EntryOf } from '@src/store/types';
-import { AgentLoop } from '../loop';
+import { ABNORMAL_REPLY, AgentLoop, CUT_TEXT_REPLY, FILTERED_REPLY } from '../loop';
 import type { LoopOptions } from '../loop';
 import { toolsForRun } from '../tools';
 import { FakeHost, FakeLayer, failed, ok, receipt } from '../testing/fake-layer';
@@ -261,6 +261,72 @@ describe('the loop', () => {
   it('ends with a plain answer when the model calls no tool', async () => {
     const { loop } = await setup([{ text: 'Here is the answer.' }]);
     expect(await loop.run()).toMatchObject({ status: 'done', outcome: 'success', turns: 1 });
+  });
+
+  it('does not call a text reply cut by the output limit a success, and keeps its text', async () => {
+    const text = 'The three cheapest flights are: 1) AAA 120, 2) BBB 1';
+    const { c, loop } = await setup([{ text, finish: 'length' }]);
+    const end = await loop.run();
+    expect(end).toMatchObject({ status: 'failed', outcome: 'partial', reason: CUT_TEXT_REPLY, cause: 'cut' });
+    const last = (await activeBranch(c.id)).at(-1) as EntryOf<'message'>;
+    expect(last.message.parts[0]).toEqual({ type: 'text', text });
+  });
+
+  it('does not call a reply the provider filtered, or ended for another reason, a success', async () => {
+    const filtered = await setup([{ finish: 'content-filter' }]);
+    expect(await filtered.loop.run()).toMatchObject({
+      status: 'failed',
+      outcome: 'failed',
+      reason: FILTERED_REPLY,
+      cause: 'provider',
+    });
+    const other = await setup([{ text: 'I will start by', finish: 'other' }]);
+    expect(await other.loop.run()).toMatchObject({ status: 'failed', outcome: 'partial', reason: ABNORMAL_REPLY });
+  });
+
+  it('ends a run whose replies keep being cut by the output limit, through the error guard', async () => {
+    const cut = (i: number) => ({
+      toolCalls: [call('click', { target: { ref: 'a1' } }, `k${i}`)],
+      finish: 'length' as const,
+    });
+    const { loop, layer } = await setup([
+      cut(1),
+      cut(2),
+      cut(3),
+      cut(4),
+      cut(5),
+      // The salvage request, in which only done is offered.
+      { toolCalls: [call('done', { outcome: 'failed', summary: 'Could not finish.' }, 'd')] },
+    ]);
+    const end = await loop.run();
+    expect(layer.calls).toHaveLength(0);
+    expect(end).toMatchObject({ status: 'failed', cause: 'guard_errors', turns: 5 });
+  });
+
+  it('gives a call that threw an error result, counts it as acted, and sends a conversation with no call unanswered', async () => {
+    const layer = new FakeLayer({
+      click: () => {
+        throw new Error('db is closed');
+      },
+    });
+    const { c, loop, scripted } = await setup(
+      [
+        { toolCalls: [call('click', { target: { ref: 'a1' } }, 'k1')] },
+        { toolCalls: [call('done', { outcome: 'success', summary: 'Clicked.' }, 'd1')] },
+        { toolCalls: [call('done', { outcome: 'partial', summary: 'Clicked, not seen.' }, 'd2')] },
+      ],
+      layer,
+    );
+    const end = await loop.run();
+    expect(end).toMatchObject({ status: 'done', outcome: 'partial' });
+    const r = await results(c.id);
+    expect(r.k1).toMatch(/^error INTERNAL \(delivery unknown\)/);
+    expect(r.k1).toContain('db is closed');
+    // The click may have reached the page: success is refused until the page is observed.
+    expect(r.d1).toMatch(/^refused: you have not seen the result/);
+    const second = JSON.stringify(scripted.calls[1].prompt);
+    expect(second).toContain('"tool-result"');
+    expect(second).toContain('error INTERNAL (delivery unknown)');
   });
 
   it('stops: the stream is aborted and remaining calls get results', async () => {

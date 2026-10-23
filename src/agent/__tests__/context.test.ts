@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { toModelMessages } from '../context';
+import { IMAGE_DROPPED_LINE, MISSING_RESULT, toModelMessages } from '../context';
 import { toDisplay } from '../display';
 import type { Entry, EntryBody } from '@src/store/types';
 
@@ -252,5 +252,125 @@ describe('tool results stay with their reply', () => {
     ];
     const roles = toModelMessages(branch, { vision: false }).map(m => m.role);
     expect(roles).toEqual(['user', 'assistant', 'tool', 'user']);
+  });
+});
+
+describe('a call with no recorded result', () => {
+  const user = (text: string) => entry({ type: 'message', message: { role: 'user', parts: [{ type: 'text', text }] } });
+  const call = (id: string, name = 'click') => ({
+    type: 'tool-call' as const,
+    toolCallId: id,
+    toolName: name,
+    input: {},
+  });
+  const result = (id: string, name = 'click') =>
+    entry({
+      type: 'message',
+      message: {
+        role: 'tool',
+        parts: [{ type: 'tool-result', toolCallId: id, toolName: name, text: 'ok', isError: false }],
+      },
+    });
+
+  const pairs = (messages: ReturnType<typeof toModelMessages>) => {
+    const parts = messages.flatMap(m =>
+      Array.isArray(m.content) ? (m.content as Array<Record<string, unknown>>) : [],
+    );
+    const calls = parts.filter(p => p.type === 'tool-call').map(p => p.toolCallId);
+    const results = parts.filter(p => p.type === 'tool-result').map(p => p.toolCallId);
+    return { calls, results };
+  };
+
+  it('is answered with an error result when a message of the user follows it, so the request can be sent', () => {
+    const branch = [
+      user('go'),
+      entry({ type: 'message', message: { role: 'assistant', parts: [call('k1'), call('k2', 'read')] } }),
+      result('k2', 'read'),
+      user('and then?'),
+    ];
+    const messages = toModelMessages(branch, { vision: false });
+    expect(messages.map(m => m.role)).toEqual(['user', 'assistant', 'tool', 'user']);
+    const { calls, results } = pairs(messages);
+    expect(results.sort()).toEqual(calls.sort());
+    const tool = messages[2].content as Array<{ toolCallId: string; output: { type: string; value: string } }>;
+    expect(tool.find(p => p.toolCallId === 'k1')!.output).toEqual({ type: 'error-text', value: MISSING_RESULT });
+  });
+
+  it('is answered when a later reply follows it', () => {
+    const branch = [
+      user('go'),
+      entry({ type: 'message', message: { role: 'assistant', parts: [call('k1')] } }),
+      entry({ type: 'message', message: { role: 'assistant', parts: [{ type: 'text', text: 'second' }] } }),
+    ];
+    const { calls, results } = pairs(toModelMessages(branch, { vision: false }));
+    expect(calls).toEqual(['k1']);
+    expect(results).toEqual(['k1']);
+  });
+
+  it('is left alone while its results may still arrive (nothing follows the reply)', () => {
+    const branch = [user('go'), entry({ type: 'message', message: { role: 'assistant', parts: [call('k1')] } })];
+    expect(pairs(toModelMessages(branch, { vision: false })).results).toEqual([]);
+  });
+});
+
+describe('images', () => {
+  const png = (data: string, note: string) => ({ type: 'image' as const, data, mediaType: 'image/png', note });
+  const branch = (): Entry[] => [
+    entry({
+      type: 'message',
+      message: {
+        role: 'user',
+        parts: [{ type: 'text', text: 'Compare my photo with the page' }, png('USERPHOTO', 'user image line')],
+      },
+    }),
+    entry({
+      type: 'message',
+      message: {
+        role: 'assistant',
+        parts: [{ type: 'tool-call', toolCallId: 's1', toolName: 'screenshot', input: {} }],
+      },
+    }),
+    entry({
+      type: 'message',
+      message: {
+        role: 'tool',
+        parts: [
+          { type: 'tool-result', toolCallId: 's1', toolName: 'screenshot', text: 'shot 1', isError: false },
+          png('SHOT1', 'page image line'),
+        ],
+      },
+    }),
+    entry({
+      type: 'message',
+      message: {
+        role: 'assistant',
+        parts: [{ type: 'tool-call', toolCallId: 's2', toolName: 'screenshot', input: {} }],
+      },
+    }),
+    entry({
+      type: 'message',
+      message: {
+        role: 'tool',
+        parts: [
+          { type: 'tool-result', toolCallId: 's2', toolName: 'screenshot', text: 'shot 2', isError: false },
+          png('SHOT2', 'page image line'),
+        ],
+      },
+    }),
+  ];
+
+  it('keeps the newest image the user attached and the newest screenshot, each of its own', () => {
+    const sent = JSON.stringify(toModelMessages(branch(), { vision: true }));
+    expect(sent).toContain('USERPHOTO');
+    expect(sent).toContain('SHOT2');
+    // The older screenshot is replaced by a line, not silently dropped.
+    expect(sent).not.toContain('SHOT1');
+    expect(sent).toContain(JSON.stringify(IMAGE_DROPPED_LINE).slice(1, -1));
+  });
+
+  it('sends no image to a model without vision', () => {
+    const sent = JSON.stringify(toModelMessages(branch(), { vision: false }));
+    expect(sent).not.toContain('USERPHOTO');
+    expect(sent).not.toContain('SHOT2');
   });
 });

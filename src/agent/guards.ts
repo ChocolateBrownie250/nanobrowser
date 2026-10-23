@@ -3,6 +3,7 @@
 import type { Result } from '@src/browser-control';
 import type { GuardState } from '@src/store/types';
 import { EMPTY_GUARDS } from '@src/store/types';
+import { defuseText } from './safe-text';
 
 export const REPEAT_WINDOW = 6;
 export const REPEAT_LIMIT = 3;
@@ -49,6 +50,17 @@ export class Guards {
     this.state = structuredClone(state);
   }
 
+  /**
+   * A reply cut off by the output limit, whose calls were not run, counts as one failure in a row: a model that keeps
+   * producing such replies stops the run like one whose calls keep failing.
+   */
+  recordCut(): GuardVerdict {
+    this.state.errorsInRow += 1;
+    if (this.state.errorsInRow >= ERROR_STOP)
+      return { stop: `${ERROR_STOP} replies or calls in a row failed or were cut off.`, guard: 'errors' };
+    return {};
+  }
+
   /** Records one call's outcome and says whether to nudge or stop. */
   record(tool: string, args: Record<string, unknown>, result: Result | undefined, isError: boolean): GuardVerdict {
     const s = this.state;
@@ -69,7 +81,7 @@ export class Guards {
       if (count >= NO_EFFECT_STOP)
         return { stop: `${tool} on the same target had no effect ${count} times.`, guard: 'no_effect' };
       if (count >= NO_EFFECT_NUDGE) {
-        const signals = result.receipt.effect.signals.join(' · ') || 'no signal';
+        const signals = defuseText(result.receipt.effect.signals.join(' · ').replace(/\s+/g, ' ')) || 'no signal';
         return {
           nudge: `${tool} on this target had no effect ${count} times (${signals}). Try another way, or ask the user.`,
         };
