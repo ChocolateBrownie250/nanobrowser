@@ -436,6 +436,8 @@
   "data.everythingHint": "删除所有对话、附加的文件和运行记录、你的快捷指令、网站规则、设置，以及模型和它们的 API 密钥。也会删除上一版本留下的对话。正在运行的任务会先停止。此操作无法撤销。你的隐私选择保持不变。",
   "data.everythingConfirm": "立即删除全部数据",
   "data.deleted": "已删除全部数据。",
+  "data.deleteFailed": "未能删除全部数据：{error}。部分数据可能仍然保留。你可以再试一次。",
+  "data.deleteFailedPlain": "未能删除全部数据，扩展程序也没有给出原因。部分数据可能仍然保留。你可以再试一次。",
   "data.previous": "旧版对话（v0.2）",
   "data.previousHint": "共 {count} 个来自 Nanobrowser v0.2 的对话。此版本无法打开它们，可以导出为 Markdown 保存。",
   "data.previousHintOne": "共 {count} 个来自 Nanobrowser v0.2 的对话。此版本无法打开它，可以导出为 Markdown 保存。",

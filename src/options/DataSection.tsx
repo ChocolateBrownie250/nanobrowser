@@ -63,10 +63,74 @@ function size(bytes: number): string {
   return bytes < 1024 * 1024 ? `${Math.round(bytes / 1024)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
-export function DataSection() {
-  const [used, setUsed] = useState<number | null>(null);
+/** Asks the worker to delete everything. Resolves with the worker's error text (or an empty one) when it did not succeed. */
+async function deleteEverything(): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    const reply = (await chrome.runtime.sendMessage({ type: DATA_REQUEST, op: 'delete-all' })) as
+      { ok?: boolean; error?: unknown } | undefined;
+    if (reply?.ok === true) return { ok: true };
+    return { ok: false, error: typeof reply?.error === 'string' ? reply.error : '' };
+  } catch (error) {
+    // The worker stopped before it answered, or could not be reached.
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/** Delete everything: a confirmation, then the notice that it was done, or why it was not (it can be tried again). */
+export function DeleteEverythingCard({ onDone }: { onDone?: () => void }) {
   const [confirming, setConfirming] = useState(false);
   const [deleted, setDeleted] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const run = async () => {
+    setBusy(true);
+    setFailure(null);
+    const result = await deleteEverything();
+    setBusy(false);
+    if (result.ok) {
+      setConfirming(false);
+      setDeleted(true);
+      onDone?.();
+    } else {
+      setDeleted(false);
+      setFailure(result.error);
+    }
+  };
+  return (
+    <SettingsCard title={t('data.everything')} description={t('data.everythingHint')} className="flex flex-col gap-2">
+      {deleted ? <Notice tone="ok">{t('data.deleted')}</Notice> : null}
+      {failure !== null ? (
+        <Notice tone="error">
+          {failure ? t('data.deleteFailed', { error: failure }) : t('data.deleteFailedPlain')}
+        </Notice>
+      ) : null}
+      {confirming ? (
+        <div className="flex gap-2">
+          <Button variant="danger" disabled={busy} onClick={() => void run()}>
+            {t('data.everythingConfirm')}
+          </Button>
+          <Button variant="ghost" disabled={busy} onClick={() => setConfirming(false)}>
+            {t('common.cancel')}
+          </Button>
+        </div>
+      ) : (
+        <Button
+          className="self-start"
+          variant="danger"
+          onClick={() => {
+            setDeleted(false);
+            setFailure(null);
+            setConfirming(true);
+          }}>
+          {t('data.everything')}
+        </Button>
+      )}
+    </SettingsCard>
+  );
+}
+
+export function DataSection() {
+  const [used, setUsed] = useState<number | null>(null);
   const measure = () =>
     void navigator.storage
       ?.estimate()
@@ -83,31 +147,7 @@ export function DataSection() {
       <SettingsCard title={t('data.conversations')} description={t('data.conversationsHint')} />
       <PreviousCard onDeleted={measure} />
       <PrivacyCard />
-      <SettingsCard title={t('data.everything')} description={t('data.everythingHint')} className="flex flex-col gap-2">
-        {deleted ? <Notice tone="ok">{t('data.deleted')}</Notice> : null}
-        {confirming ? (
-          <div className="flex gap-2">
-            <Button
-              variant="danger"
-              onClick={() =>
-                void chrome.runtime.sendMessage({ type: DATA_REQUEST, op: 'delete-all' }).then(() => {
-                  setConfirming(false);
-                  setDeleted(true);
-                  measure();
-                })
-              }>
-              {t('data.everythingConfirm')}
-            </Button>
-            <Button variant="ghost" onClick={() => setConfirming(false)}>
-              {t('common.cancel')}
-            </Button>
-          </div>
-        ) : (
-          <Button className="self-start" variant="danger" onClick={() => setConfirming(true)}>
-            {t('data.everything')}
-          </Button>
-        )}
-      </SettingsCard>
+      <DeleteEverythingCard onDone={measure} />
     </div>
   );
 }

@@ -132,11 +132,27 @@ export async function getEntries(conversationId: string): Promise<Entry[]> {
   return (await db()).getAllFromIndex('entries', 'conversationId', conversationId);
 }
 
-/** The path from the root to `leafId` (default: the conversation's leaf), oldest first. */
+/**
+ * The path from the root to `leafId` (default: the conversation's leaf), oldest first. It follows `parentId` from the
+ * leaf in one read-only transaction, so only the entries of the path are read (the other branches, with their inline
+ * images, stay on disk). Like `branchFrom`, it stops at an entry that is missing or belongs to another conversation.
+ */
 export async function activeBranch(conversationId: string, leafId?: string | null): Promise<Entry[]> {
-  const conversation = await getConversation(conversationId);
-  const leaf = leafId !== undefined ? leafId : (conversation?.leafId ?? null);
-  return branchFrom(await getEntries(conversationId), leaf);
+  const tx = (await db()).transaction(['conversations', 'entries'], 'readonly');
+  const entries = tx.objectStore('entries');
+  let id =
+    leafId !== undefined ? leafId : ((await tx.objectStore('conversations').get(conversationId))?.leafId ?? null);
+  const path: Entry[] = [];
+  const seen = new Set<string>();
+  while (id && !seen.has(id)) {
+    seen.add(id);
+    const entry = await entries.get(id);
+    if (!entry || entry.conversationId !== conversationId) break;
+    path.push(entry);
+    id = entry.parentId;
+  }
+  await tx.done;
+  return path.reverse();
 }
 
 export function branchFrom(entries: Entry[], leafId: string | null): Entry[] {
@@ -174,6 +190,31 @@ export async function putBlob(blob: StoredBlob): Promise<void> {
 
 export async function getBlob(id: string): Promise<StoredBlob | undefined> {
   return (await db()).get('blobs', id);
+}
+
+/** Removes one stored file (one the user took out of the composer, or one the worker refused). */
+export async function deleteBlob(id: string): Promise<void> {
+  await (await db()).delete('blobs', id);
+}
+
+/**
+ * Removes the files that never reached a conversation (conversationId '') and were added more than `maxAgeMs` ago:
+ * files left in the composer when the panel closed, and ones a send did not take. Returns how many were removed.
+ */
+export async function sweepOrphanBlobs(maxAgeMs: number): Promise<number> {
+  const cutoff = new Date(Date.now() - maxAgeMs).toISOString();
+  const tx = (await db()).transaction('blobs', 'readwrite');
+  let removed = 0;
+  let cursor = await tx.store.index('conversationId').openCursor('');
+  while (cursor) {
+    if (cursor.value.createdAt < cutoff) {
+      await cursor.delete();
+      removed += 1;
+    }
+    cursor = await cursor.continue();
+  }
+  await tx.done;
+  return removed;
 }
 
 export async function listBlobs(conversationId: string): Promise<StoredBlob[]> {

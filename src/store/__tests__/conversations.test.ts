@@ -1,12 +1,15 @@
 import 'fake-indexeddb/auto';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { IDBFactory } from 'fake-indexeddb';
 import {
   activeBranch,
   appendEntry,
+  branchFrom,
   closeDb,
   createConversation,
+  deleteBlob,
   deleteConversation,
+  getBlob,
   getConversation,
   getEntries,
   getRun,
@@ -15,11 +18,12 @@ import {
   putBlob,
   putRun,
   setLeaf,
+  sweepOrphanBlobs,
   titleFrom,
   updateConversation,
 } from '../index';
 import { EMPTY_GUARDS, ZERO_USAGE } from '../types';
-import type { StoredMessage } from '../types';
+import type { StoredBlob, StoredMessage } from '../types';
 
 const user = (text: string): StoredMessage => ({ role: 'user', parts: [{ type: 'text', text }] });
 
@@ -115,6 +119,101 @@ describe('conversations', () => {
 
   it('refuses an entry for a conversation that does not exist', async () => {
     await expect(appendEntry('nope', { type: 'mode_change', mode: 'ask' })).rejects.toThrow(/does not exist/);
+  });
+});
+
+const blob = (id: string, conversationId: string, createdAt: string): StoredBlob => ({
+  id,
+  conversationId,
+  name: `${id}.txt`,
+  mimeType: 'text/plain',
+  size: 1,
+  data: new Blob(['x']),
+  createdAt,
+});
+const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
+const DAY = 24 * 60 * 60 * 1000;
+
+describe('stored files', () => {
+  it('deleteBlob removes the row', async () => {
+    await putBlob(blob('a', '', ago(0)));
+    await putBlob(blob('b', '', ago(0)));
+    await deleteBlob('a');
+    expect(await getBlob('a')).toBeUndefined();
+    expect(await getBlob('b')).toBeDefined();
+    // Removing a file that is not there is not an error.
+    await expect(deleteBlob('a')).resolves.toBeUndefined();
+  });
+
+  it('the sweep removes old unowned files and keeps fresh ones and those of a conversation', async () => {
+    const c = await createConversation({ mode: 'ask' });
+    await putBlob(blob('old', '', ago(2 * DAY)));
+    await putBlob(blob('old2', '', ago(3 * DAY)));
+    await putBlob(blob('fresh', '', ago(60_000)));
+    await putBlob(blob('owned', c.id, ago(10 * DAY)));
+    expect(await sweepOrphanBlobs(DAY)).toBe(2);
+    expect(await getBlob('old')).toBeUndefined();
+    expect(await getBlob('old2')).toBeUndefined();
+    expect(await getBlob('fresh')).toBeDefined();
+    expect(await getBlob('owned')).toBeDefined();
+    expect(await sweepOrphanBlobs(DAY)).toBe(0);
+  });
+});
+
+describe('activeBranch', () => {
+  it('equals walking the whole entry list, for every leaf of a branched conversation', async () => {
+    const c = await createConversation({ mode: 'ask' });
+    const other = await createConversation({ mode: 'ask' });
+    const a = await appendEntry(c.id, { type: 'message', message: user('a') });
+    const b = await appendEntry(c.id, { type: 'message', message: user('b') });
+    const c1 = await appendEntry(c.id, { type: 'message', message: user('c1') });
+    const d = await appendEntry(c.id, { type: 'message', message: user('d') }, { parentId: b.id });
+    const e = await appendEntry(c.id, { type: 'message', message: user('e') });
+    const root2 = await appendEntry(c.id, { type: 'message', message: user('r2') }, { parentId: null });
+    const f = await appendEntry(c.id, { type: 'message', message: user('f') });
+    // An entry whose parent was never stored, and an entry of another conversation under the same id space.
+    const orphan = await appendEntry(
+      c.id,
+      { type: 'message', message: user('o') },
+      { parentId: 'ghost', keepLeaf: true },
+    );
+    const foreign = await appendEntry(other.id, { type: 'message', message: user('x') });
+    await setLeaf(c.id, e.id);
+
+    const all = await getEntries(c.id);
+    const leaves: Array<string | null | undefined> = [
+      undefined,
+      null,
+      'unknown',
+      ...[a, b, c1, d, e, root2, f, orphan, foreign].map(x => x.id),
+    ];
+    for (const leaf of leaves) {
+      const expected = branchFrom(all, leaf === undefined ? e.id : leaf);
+      expect((await activeBranch(c.id, leaf)).map(x => x.id)).toEqual(expected.map(x => x.id));
+    }
+    expect((await activeBranch(c.id)).map(x => x.id)).toEqual([a.id, b.id, d.id, e.id]);
+    expect((await activeBranch(c.id, orphan.id)).map(x => x.id)).toEqual([orphan.id]);
+    expect(await activeBranch(c.id, foreign.id)).toEqual([]);
+    expect(await activeBranch('nope')).toEqual([]);
+  });
+
+  it('reads only the entries of the path', async () => {
+    const c = await createConversation({ mode: 'ask' });
+    const root = await appendEntry(c.id, { type: 'message', message: user('root') });
+    for (let i = 0; i < 20; i++)
+      await appendEntry(c.id, { type: 'message', message: user(`dead ${i}`) }, { parentId: root.id, keepLeaf: true });
+    const leaf = await appendEntry(c.id, { type: 'message', message: user('live') }, { parentId: root.id });
+    const gets = vi.spyOn(IDBObjectStore.prototype, 'get');
+    const getAll = vi.spyOn(IDBIndex.prototype, 'getAll');
+    try {
+      expect((await activeBranch(c.id)).map(x => x.id)).toEqual([root.id, leaf.id]);
+      // The conversation, then one read per entry on the path; no read of the whole conversation.
+      expect(gets).toHaveBeenCalledTimes(3);
+      expect(getAll).not.toHaveBeenCalled();
+    } finally {
+      gets.mockRestore();
+      getAll.mockRestore();
+    }
   });
 });
 

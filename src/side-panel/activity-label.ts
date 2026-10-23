@@ -52,20 +52,24 @@ const ALLOWED: Record<string, MessageKey> = {
   auto: 'act.allowedAuto',
 };
 
+// The argument names that carry text the agent typed or expects to see. They are masked wherever they sit in the
+// arguments (the `expect` of an action, the entries of `fields`), as a string or a list of strings.
+const MASKED_KEYS = new Set(['value', 'text', 'promptText', 'textGone']);
+const MAX_DEPTH = 8;
+
+function maskValue(value: unknown, masked: boolean, depth: number): unknown {
+  if (typeof value === 'string') return masked ? t('act.typedLength', { count: value.length }) : value;
+  if (depth > MAX_DEPTH || !value || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map(item => maskValue(item, masked, depth + 1));
+  return Object.fromEntries(
+    Object.entries(value).map(([key, item]) => [key, maskValue(item, MASKED_KEYS.has(key), depth + 1)]),
+  );
+}
+
 /** Typed values are masked in what the panel shows, as in the audit log. */
 export function maskArgs(args: unknown): unknown {
   if (!args || typeof args !== 'object') return args;
-  const out: Record<string, unknown> = { ...(args as Record<string, unknown>) };
-  for (const key of ['value', 'text', 'promptText']) {
-    if (typeof out[key] === 'string') out[key] = t('act.typedLength', { count: (out[key] as string).length });
-  }
-  if (Array.isArray(out.fields)) {
-    out.fields = (out.fields as Array<Record<string, unknown>>).map(f => ({
-      ...f,
-      value: typeof f.value === 'string' ? t('act.typedLength', { count: f.value.length }) : f.value,
-    }));
-  }
-  return out;
+  return maskValue(args, false, 0);
 }
 
 export function activityLine(row: ToolRow): ActivityLine {
