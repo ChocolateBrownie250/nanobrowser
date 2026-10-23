@@ -104,6 +104,8 @@ export class RunManager {
   readonly border: PageBorder;
   /** Messages typed while the agent works: one queue per conversation, in the worker. */
   #queues = new Map<string, QueuedMessage[]>();
+  /** Conversations where a send added its message but another run won the start (it may not have read the message). */
+  #followUp = new Set<string>();
   /** The open panels, for what goes to one tab's panel only (a selection). */
   readonly connections = new Set<PanelConnection>();
   /** Selections for a tab whose panel is not open yet, delivered when it subscribes. */
@@ -392,7 +394,11 @@ export class RunManager {
         conversationId,
         [...this.connections].find(c => c.conversationId === conversationId),
       );
-      if (plan.reopen) void this.#reopen(conversationId, record, plan.reopen);
+      if (plan.reopen) {
+        void this.#reopen(conversationId, record, plan.reopen).catch(error =>
+          console.warn('[run-manager] a restored card could not be finished', error),
+        );
+      }
     }
     await this.#watchdog();
   }
@@ -435,6 +441,8 @@ export class RunManager {
         new AbortController().signal,
         { tabId },
       );
+      // The conversation was deleted while the card was open (that withdraws the card): nothing is left to write to.
+      if (!(await getConversation(conversationId))) return;
       // The call that met the step is answered by the hand-over and never sent again: its partial result, the
       // outcome, and on Done a fresh observation.
       const partial = prompt.answers?.partialResult;
@@ -499,6 +507,7 @@ export class RunManager {
         new AbortController().signal,
         { tabId },
       );
+      if (!(await getConversation(conversationId))) return;
       const continued = answer !== 'withdrawn' && answer.outcome === 'continue';
       const text = continued
         ? ['ask_user · the user continued', ...(answer.data !== undefined ? [`answer: ${answer.data}`] : [])].join('\n')
@@ -917,7 +926,11 @@ export class RunManager {
         ? [{ type: 'selection' as const, text: c.text.slice(0, 20_000), url: c.url, title: c.title }]
         : [],
     );
-    if (!text && !files.length && !quotes.length) return;
+    if (!text && !files.length && !quotes.length) {
+      // Every file was refused or gone and there is no text: nothing is sent, and the user is told why.
+      for (const warning of warnings) await this.#notice(conversationId, warning, 'warn');
+      return;
+    }
     const entry = await appendEntry(conversationId, {
       type: 'message',
       message: { role: 'user', parts: [...(text ? [{ type: 'text' as const, text }] : []), ...quotes, ...files] },
@@ -945,12 +958,20 @@ export class RunManager {
     for (const warning of warnings) await this.#notice(conversationId, warning, 'warn');
     if (startUrl) await openStartPage(command.tabId, startUrl);
     // The run takes the pair this message carried, whatever was chosen since. If another start won meanwhile, this
-    // message is already in the conversation, and that run reads it at its next turn.
-    this.#launch(
+    // message is already in the conversation: that run reads it at its next turn, and when it ends without having
+    // read it (it was on its last turn), a run of its own answers it.
+    const started = this.#launch(
       conversationId,
       undefined,
       command.model ? { model: command.model, reasoning: command.reasoning } : undefined,
     );
+    if (!started) this.#followUp.add(conversationId);
+  }
+
+  /** Whether the last message of the conversation's branch (notes the app wrote do not count) is the user's. */
+  async #endsWithUserMessage(conversationId: string): Promise<boolean> {
+    const last = (await activeBranch(conversationId)).filter(e => e.type === 'message' && !e.appOwned).at(-1);
+    return last?.type === 'message' && last.message.role === 'user';
   }
 
   /**
@@ -972,7 +993,12 @@ export class RunManager {
       .catch(() => true);
     for (const ref of refs) {
       const blob = await getBlob(ref.id);
-      if (!blob || (blob.conversationId && blob.conversationId !== conversationId)) continue;
+      if (!blob) {
+        // Gone from the store (removed from the composer, or swept after a day unsent): said, not dropped silently.
+        warnings.push(`${ref.name} is no longer available and was not attached. Attach it again.`);
+        continue;
+      }
+      if (blob.conversationId && blob.conversationId !== conversationId) continue;
       const kind = attachmentKind(blob.name, blob.mimeType);
       // A refused file that no conversation holds yet is deleted now, so it does not sit in the store until the sweep.
       const discard = async () => {
@@ -1469,7 +1495,11 @@ export class RunManager {
         // When a run ends the debugger is detached; the next run attaches again and starts fresh.
         await this.#closeSession(conversationId);
         // A message queued as the run was ending is sent now, as the next message. Stop gave the queue back already.
-        if (!controller.signal.aborted) await this.#sendQueued(conversationId);
+        const unanswered = this.#followUp.delete(conversationId) && (await this.#endsWithUserMessage(conversationId));
+        if (!controller.signal.aborted) {
+          await this.#sendQueued(conversationId);
+          if (unanswered) this.#launch(conversationId);
+        }
         // `/compact` that reached the run after its last turn is done now.
         if (loopRef?.compactionPending && !this.#runs.has(conversationId)) await this.#compact(conversationId);
       }

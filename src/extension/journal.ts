@@ -70,6 +70,8 @@ export class Journal {
   /** What each conversation's stored window takes, and when it was last written, for the shared budget. */
   #stored = new Map<string, { bytes: number; at: number }>();
   #seeded: Promise<void> | null = null;
+  /** The last scheduled write of each conversation's stored copy. */
+  #writing = new Map<string, Promise<void>>();
 
   #journal(conversationId: string): ConversationJournal {
     let journal = this.#journals.get(conversationId);
@@ -194,17 +196,35 @@ export class Journal {
     }
   }
 
-  /** Writes the bounded copy of the window. A full storage area is not an error: the window stays in memory. */
-  async #persist(conversationId: string, journal: ConversationJournal): Promise<void> {
+  /**
+   * Writes the bounded copy of the window. A full storage area is not an error: the window stays in memory. The writes
+   * of one conversation run one after another, each taking its copy when it starts, so the last write is the newest.
+   */
+  #persist(conversationId: string, journal: ConversationJournal): Promise<void> {
+    const write = () => this.#write(conversationId, journal);
+    const next = (this.#writing.get(conversationId) ?? Promise.resolve()).then(write, write);
+    const tail = next.catch(() => undefined);
+    this.#writing.set(conversationId, tail);
+    void tail.then(() => {
+      if (this.#writing.get(conversationId) === tail) this.#writing.delete(conversationId);
+    });
+    return next;
+  }
+
+  async #write(conversationId: string, journal: ConversationJournal): Promise<void> {
     const area = sessionStorage();
     if (!area) return;
+    await this.#seed();
+    // Forgotten while this write waited (the conversation was deleted): nothing is written back.
+    if (this.#journals.get(conversationId) !== journal) return;
     const events = newestWithin(journal.events.map(slimEvent), MAX_STORED_BYTES);
     const value = { seq: journal.seq, events };
     const bytes = JSON.stringify(value).length;
-    await this.#seed();
     // Counted before the write, so the budget holds even when the write is refused.
     this.#stored.set(conversationId, { bytes, at: Date.now() });
     await this.#makeRoom(conversationId);
+    // The check and the call are one step, so a forget() after them removes the key after this write.
+    if (this.#journals.get(conversationId) !== journal) return;
     await area.set({ [`${PREFIX}${conversationId}`]: value });
   }
 

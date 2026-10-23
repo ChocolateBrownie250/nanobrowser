@@ -184,4 +184,16 @@ describe('Journal storage use', () => {
     await vi.advanceTimersByTimeAsync(300);
     expect((store['nb.journal.c1'] as { seq: number }).seq).toBe(2);
   });
+  it('does not write a deleted conversation back when its write was already under way', async () => {
+    const { state, store } = fakeSession();
+    // The stored window loads in 100 ms, the write starts 250 ms later and then waits 100 ms for the existing storage
+    // to be read: forget() comes while it waits.
+    state.delayGet = 100;
+    const journal = new Journal();
+    journal.emit('c1', { type: 'turn_start', turn: 1 });
+    await vi.advanceTimersByTimeAsync(400);
+    journal.forget('c1');
+    await vi.advanceTimersByTimeAsync(500);
+    expect('nb.journal.c1' in store).toBe(false);
+  });
 });

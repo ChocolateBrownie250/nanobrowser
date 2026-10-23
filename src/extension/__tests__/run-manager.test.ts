@@ -359,6 +359,11 @@ describe('one run per conversation', () => {
     const gateOpen = gate();
     h.script = async () => {
       await gateOpen.wait;
+      // The run read both messages and answered them, as the loop does at its next turn.
+      await new records.RunWriter(conversation.id, 'x').message({
+        role: 'assistant',
+        parts: [{ type: 'text', text: 'Both done.' }],
+      });
       return DONE;
     };
     const second: PanelConnection = { tabId: null, conversationId: null, sink: () => undefined };
@@ -381,6 +386,86 @@ describe('one run per conversation', () => {
     );
     expect(h.loops).toHaveLength(1);
     expect((await s.getRun(conversation.id))?.status).toBe('done');
+  });
+});
+
+describe('files sent with a message', () => {
+  it('says so when a file is no longer in the store, and still sends the text', async () => {
+    const manager = await newManager();
+    const conversation = await s.createConversation({ mode: 'ask', tabs: [1] });
+    await manager.scope.add(conversation.id, 1, 'start');
+    await manager.handle(connection, {
+      ...send(conversation.id, 'read the notes'),
+      attachments: [{ id: 'gone', name: 'notes.txt', mimeType: 'text/plain', size: 5 }],
+    });
+    await until(
+      () => manager.isRunning(conversation.id),
+      r => !r,
+      'run ends',
+    );
+    const notices = (await s.activeBranch(conversation.id)).flatMap(e =>
+      e.type === 'ui' && e.kind === 'notice' ? [(e.data as { text: string }).text] : [],
+    );
+    expect(notices.some(t => t.includes('notes.txt') && t.includes('no longer available'))).toBe(true);
+  });
+
+  it('says so, and sends nothing, when the only file is gone', async () => {
+    const manager = await newManager();
+    const conversation = await s.createConversation({ mode: 'ask', tabs: [1] });
+    await manager.scope.add(conversation.id, 1, 'start');
+    await manager.handle(connection, {
+      ...send(conversation.id, ''),
+      attachments: [{ id: 'gone', name: 'notes.txt', mimeType: 'text/plain', size: 5 }],
+    });
+    const notices = (await s.activeBranch(conversation.id)).flatMap(e =>
+      e.type === 'ui' && e.kind === 'notice' ? [(e.data as { text: string }).text] : [],
+    );
+    expect(notices.some(t => t.includes('notes.txt'))).toBe(true);
+    expect(h.loops).toHaveLength(0);
+  });
+});
+
+describe('a message that lost the race to start a run', () => {
+  it('is answered by a run of its own when the winning run ended without reading it', async () => {
+    const manager = await newManager();
+    const conversation = await s.createConversation({ mode: 'ask', tabs: [1] });
+    await manager.scope.add(conversation.id, 1, 'start');
+    const gateOpen = gate();
+    let runs = 0;
+    h.script = async () => {
+      runs += 1;
+      if (runs === 1) await gateOpen.wait;
+      // The first run ends on its last turn without a reply to the second message; the second run answers it.
+      if (runs === 2) {
+        await new records.RunWriter(conversation.id, 'x').message({
+          role: 'assistant',
+          parts: [{ type: 'text', text: 'Answered.' }],
+        });
+      }
+      return DONE;
+    };
+    const second: PanelConnection = { tabId: null, conversationId: null, sink: () => undefined };
+    await Promise.all([
+      manager.handle(connection, send(conversation.id, 'first')),
+      manager.handle(second, send(conversation.id, 'second')),
+    ]);
+    await until(
+      () => h.loops.length,
+      n => n >= 1,
+      'a loop',
+    );
+    gateOpen.open();
+    await until(
+      () => h.loops.length,
+      n => n === 2,
+      'a second loop for the unanswered message',
+    );
+    await until(
+      () => manager.isRunning(conversation.id),
+      r => !r,
+      'runs end',
+    );
+    expect(h.loops).toHaveLength(2);
   });
 });
 
@@ -542,6 +627,29 @@ describe('restore', () => {
       r => r?.status === 'stopped',
       'stopped',
     );
+  });
+
+  it('deleting a conversation whose restored card is open leaves no unhandled rejection', async () => {
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown) => rejections.push(reason);
+    process.on('unhandledRejection', onRejection);
+    try {
+      const manager = await newManager();
+      const { conversation } = await seedRun({ status: 'awaiting_user', pendingPrompt: handoverPrompt() });
+      await manager.handle(connection, { type: 'subscribe', tabId: 1, conversationId: conversation.id });
+      await manager.restore();
+      await until(
+        () => manager.broker.promptsOf(conversation.id).length,
+        n => n === 1,
+        'card reopened',
+      );
+      await manager.handle(connection, { type: 'delete', conversationId: conversation.id });
+      await new Promise(r => setTimeout(r, 50));
+      expect(await s.getConversation(conversation.id)).toBeUndefined();
+      expect(rejections).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onRejection);
+    }
   });
 
   it('a restored hand-over whose tab is gone ends interrupted, not stopped', async () => {
