@@ -69,8 +69,12 @@ export interface RetryPolicy {
 
 export const DEFAULT_RETRY: RetryPolicy = { attempts: 3, baseMs: 1000, maxMs: 30_000 };
 
-/** A Retry-After longer than this is not waited for: the turn ends with the provider's message, which has the reset time. */
-export const MAX_RETRY_AFTER_MS = 15_000;
+/**
+ * A Retry-After longer than this is not waited for: the turn ends with the provider's message, which has the reset
+ * time. It sits above a per-minute window (a limit that resets within the minute is waited out) and below the hour
+ * windows of a quota.
+ */
+export const MAX_RETRY_AFTER_MS = 120_000;
 
 export interface TurnRequest {
   chat: ChatModel;
@@ -128,7 +132,8 @@ function sleepFor(ms: number, signal?: AbortSignal): Promise<void> {
 
 export function backoffMs(attempt: number, policy: RetryPolicy, error: unknown, random = Math.random): number {
   const asked = retryAfterMs(error);
-  if (asked !== undefined) return Math.min(asked, policy.maxMs);
+  // A wait the provider asked for is waited as asked: sooner would only meet the same limit again.
+  if (asked !== undefined) return Math.min(asked, MAX_RETRY_AFTER_MS);
   const exp = policy.baseMs * 2 ** (attempt - 1);
   return Math.min(policy.maxMs, exp / 2 + random() * (exp / 2));
 }
@@ -222,7 +227,9 @@ async function streamTurnNow(request: TurnRequest): Promise<TurnResult> {
   let messages = request.messages;
   let imagesDropped = false;
   let reasoningIgnored = false;
-  const limits = modelTimeouts(request.chat.spec);
+  // The SDK's timeout takes the first-output and between-output limits; the header limit is the fetch's (providers.ts).
+  const { firstChunkMs, chunkMs } = modelTimeouts(request.chat.spec);
+  const limits = { firstChunkMs, chunkMs };
   for (;;) {
     attempt++;
     let text = '';
@@ -232,6 +239,7 @@ async function streamTurnNow(request: TurnRequest): Promise<TurnResult> {
     let rawFinish: string | undefined;
     let usage: TokenUsage | null = null;
     let failure: unknown;
+    let silentAfterAnswer = false;
     // A server that takes the effort as a provider option gets it there, and the SDK's `reasoning` is left out.
     const effortOptions = reasoning ? request.chat.reasoningOptions?.(reasoning) : undefined;
     try {
@@ -258,9 +266,10 @@ async function streamTurnNow(request: TurnRequest): Promise<TurnResult> {
             text += part.text;
             request.onTextDelta?.(part.text);
             break;
-          // Reasoning is discarded, but it has started the reply: an error after it is not retried.
+          // Reasoning is discarded, but it has started the reply: an error after it is not retried. An empty delta (a
+          // signature-only block) does not count: the SDK's timer does not take it for output either.
           case 'reasoning-delta':
-            started = true;
+            if (part.text) started = true;
             break;
           case 'tool-call': {
             started = true;
@@ -302,8 +311,12 @@ async function streamTurnNow(request: TurnRequest): Promise<TurnResult> {
     // The SDK's own timeout aborts the call without the user's signal: that is a stalled server, not a Stop.
     const silent = () =>
       new ModelTimeoutError(Math.round((started ? limits.chunkMs : limits.firstChunkMs) / 1000), started);
-    if (failure === undefined && finish === 'aborted') failure = silent();
-    else if (failure !== undefined && isTimeoutAbort(failure)) failure = silent();
+    if ((failure === undefined && finish === 'aborted') || (failure !== undefined && isTimeoutAbort(failure))) {
+      failure = silent();
+      // The server answered and then sent nothing: it is thinking or stuck, and the same request would be too (and be
+      // billed again). Only a server that never answered at all (the header timeout) is asked again.
+      silentAfterAnswer = true;
+    }
     if (failure === undefined) {
       // The server's own end-of-context signal: the window filled during the reply, which is an overflow.
       if (rawFinish === 'model_context_window_exceeded') {
@@ -325,7 +338,7 @@ async function streamTurnNow(request: TurnRequest): Promise<TurnResult> {
       }
       // A reply with no text and no calls that did not end naturally (Z.ai's "sensitive", a content filter, a cut
       // stream) is a failure, not a model that had nothing to say.
-      if (!text && !toolCalls.length && (finish === 'other' || finish === 'content-filter')) {
+      if (!text && !toolCalls.length && (finish === 'other' || finish === 'content-filter' || finish === 'error')) {
         return {
           text,
           toolCalls: [],
@@ -346,7 +359,9 @@ async function streamTurnNow(request: TurnRequest): Promise<TurnResult> {
       return {
         text,
         toolCalls,
-        finish,
+        // A server that names no finish reason at all, after an answer, finished it; one that names a reason the SDK
+        // does not know ("sensitive", a vendor string) did not say so, and the loop reads that as unfinished.
+        finish: finish === 'other' && rawFinish === undefined && text.trim() ? 'stop' : finish,
         usage,
         durationMs: Date.now() - start,
         attempts: attempt,
@@ -383,7 +398,7 @@ async function streamTurnNow(request: TurnRequest): Promise<TurnResult> {
     // user with its own text and the wait.
     const asked = retryAfterMs(failure);
     const tooLong = asked !== undefined && asked > MAX_RETRY_AFTER_MS && isRetryable(failure);
-    if (!started && !tooLong && attempt < policy.attempts && isRetryable(failure)) {
+    if (!started && !silentAfterAnswer && !tooLong && attempt < policy.attempts && isRetryable(failure)) {
       await sleep(backoffMs(attempt, policy, failure), request.signal);
       if (request.signal?.aborted) {
         return { text, toolCalls: [], finish: 'aborted', usage, durationMs: Date.now() - start, attempts: attempt };

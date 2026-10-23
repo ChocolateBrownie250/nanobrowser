@@ -206,7 +206,7 @@ export async function listModels(
   fetchFn: typeof fetch = fetch,
   signal?: AbortSignal,
 ): Promise<ModelList> {
-  const get = async (url: string, headers: Record<string, string> = {}) => {
+  const get = async (url: string, headers: Record<string, string> = {}, bareArray = false) => {
     const host = new URL(url).host;
     const deadline = withDeadline(LIST_TIMEOUT_MS, signal);
     try {
@@ -231,12 +231,13 @@ export async function listModels(
           originRefused: response.status === 403,
         });
       }
-      // A 200 that is not a JSON object (a proxy's or portal's page) is not a model list.
-      const body = (await response.json().catch(() => null)) as Record<string, unknown> | null;
-      if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      // A 200 that is not a JSON object (a proxy's or portal's page) is not a model list. Some OpenAI-compatible
+      // servers answer with the bare array of models instead of `{ data: [...] }`; only that list reads one.
+      const body = (await response.json().catch(() => null)) as Record<string, unknown> | unknown[] | null;
+      if (!body || typeof body !== 'object' || (Array.isArray(body) && !bareArray)) {
         throw Object.assign(new Error(`Unexpected answer from ${host}`), { originRefused: false });
       }
-      return body;
+      return Array.isArray(body) ? { data: body } : body;
     } finally {
       deadline.done();
     }
@@ -293,7 +294,7 @@ export async function listModels(
         spec.kind === 'openai'
           ? spec.baseUrl || 'https://api.openai.com/v1'
           : openAICompatibleBaseUrl(spec.kind, spec.baseUrl);
-      const body = await get(`${base}/models`, spec.apiKey ? { authorization: `Bearer ${spec.apiKey}` } : {});
+      const body = await get(`${base}/models`, spec.apiKey ? { authorization: `Bearer ${spec.apiKey}` } : {}, true);
       entries = ((body.data as ListEntry[]) ?? [])
         .map((m): [string, ListEntry] => [String(m.id), m])
         .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));

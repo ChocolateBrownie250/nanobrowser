@@ -90,9 +90,11 @@ function stallingFetch(head: string) {
 
 describe('a model call that stops answering', () => {
   it('gives the limits: generous on the cloud, longer on a local server', () => {
-    expect(modelTimeouts(ZAI)).toEqual({ firstChunkMs: 180_000, chunkMs: 120_000 });
+    // The first output waits 10 minutes: a reasoning model that streams none of its thinking is silent that long.
+    expect(modelTimeouts(ZAI)).toEqual({ headersMs: 180_000, firstChunkMs: 600_000, chunkMs: 120_000 });
     expect(modelTimeouts({ kind: 'openai-compatible', baseUrl: 'https://api.deepseek.com/v1' })).toEqual({
-      firstChunkMs: 180_000,
+      headersMs: 180_000,
+      firstChunkMs: 600_000,
       chunkMs: 120_000,
     });
     for (const spec of [
@@ -100,7 +102,7 @@ describe('a model call that stops answering', () => {
       { kind: 'lmstudio' as const },
       { kind: 'openai-compatible' as const, baseUrl: 'http://localhost:8000/v1' },
     ]) {
-      expect(modelTimeouts(spec)).toEqual({ firstChunkMs: 600_000, chunkMs: 300_000 });
+      expect(modelTimeouts(spec)).toEqual({ headersMs: 600_000, firstChunkMs: 600_000, chunkMs: 300_000 });
     }
   });
 
@@ -154,6 +156,52 @@ describe('a model call that stops answering', () => {
     expect(r).toMatchObject({ finish: 'error', text: 'Par', attempts: 1 });
     expect(r.error?.message).toMatch(/nothing arrived for 120 seconds/);
     expect(r.error?.network).toBe(true);
+  });
+
+  it('a server that answered and is thinking silently is waited for up to 10 minutes, then not asked again', async () => {
+    vi.useFakeTimers();
+    const fetch = stallingFetch(anthropicSse([start]));
+    let done = false;
+    const result = turn(fetch, { reasoning: 'high' }).then(r => {
+      done = true;
+      return r;
+    });
+    // 5 minutes of silence after the response began is still fine.
+    await vi.advanceTimersByTimeAsync(300_000);
+    expect(done).toBe(false);
+    await vi.advanceTimersByTimeAsync(301_000);
+    const r = await result;
+    // One request: the same call would think as long again, and be billed again.
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(r).toMatchObject({ finish: 'error', attempts: 1 });
+    expect(r.error?.message).toMatch(/did not answer within 600 seconds/);
+    expect(r.error?.timeout).toBe(true);
+  });
+
+  it('a reply that starts after minutes of silent thinking completes', async () => {
+    vi.useFakeTimers();
+    const answer = anthropicSse([start, ...textBlock('Done thinking'), ...stop('end_turn')]);
+    const fetch = vi.fn(
+      () => new Promise<Response>(resolve => setTimeout(() => resolve(sseResponse(answer)), 170_000)),
+    ) as unknown as typeof globalThis.fetch;
+    const result = turn(fetch, { reasoning: 'high' });
+    await vi.advanceTimersByTimeAsync(171_000);
+    expect(await result).toMatchObject({ text: 'Done thinking', finish: 'stop', attempts: 1 });
+  });
+
+  it('a thinking block that carries only a signature does not count as output, and the error names the right limit', async () => {
+    vi.useFakeTimers();
+    const head = anthropicSse([
+      start,
+      { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '', signature: '' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: 'sig' } },
+    ]);
+    const fetch = stallingFetch(head);
+    const result = turn(fetch, { reasoning: 'high' });
+    await vi.advanceTimersByTimeAsync(601_000);
+    const r = await result;
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(r.error?.message).toMatch(/did not answer within 600 seconds/);
   });
 
   it('a local server gets longer: 5 minutes of silence is not an error, 10 minutes is', async () => {
@@ -219,6 +267,23 @@ describe('a reply that ends without an answer', () => {
     const r = await turn(fetch);
     expect(r).toMatchObject({ text: 'Partly', finish: 'other' });
     expect(r.error).toBeUndefined();
+  });
+
+  it('an OpenAI-compatible server that names no finish reason after an answer finished it; a vendor reason did not', async () => {
+    const local: ModelSpec = {
+      kind: 'openai-compatible',
+      modelName: 'm',
+      apiKey: 'k',
+      baseUrl: 'http://localhost:1234/v1',
+    };
+    const chunk = (delta: unknown, finish: string | null) =>
+      `data: ${JSON.stringify({ id: '1', object: 'chat.completion.chunk', created: 1, model: 'm', choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
+    const body = (finish: string | null) =>
+      chunk({ role: 'assistant', content: 'All done.' }, null) + (finish ? chunk({}, finish) : '') + 'data: [DONE]\n\n';
+    const silent = (async () => sseResponse(body(null))) as typeof globalThis.fetch;
+    expect(await turn(silent, {}, local)).toMatchObject({ text: 'All done.', finish: 'stop' });
+    const vendor = (async () => sseResponse(body('vendor_specific'))) as typeof globalThis.fetch;
+    expect(await turn(vendor, {}, local)).toMatchObject({ text: 'All done.', finish: 'other' });
   });
 
   it('a reply with a tool call keeps it', async () => {
@@ -294,11 +359,28 @@ describe('a 429', () => {
     expect(fetch).toHaveBeenCalledTimes(3);
   });
 
-  it('with a Retry-After above 15 s is not waited for, and the error names the wait', async () => {
+  it('with a Retry-After a per-minute limit asks for is waited out, as asked', async () => {
+    const sleeps: number[] = [];
+    let n = 0;
+    const answer = anthropicSse([start, ...textBlock('Back'), ...stop('end_turn')]);
+    const fetch = vi.fn(async () =>
+      ++n < 3
+        ? new Response('{"error":{"message":"Rate limit reached"}}', {
+            status: 429,
+            headers: { 'content-type': 'application/json', 'retry-after': '45' },
+          })
+        : sseResponse(answer),
+    ) as unknown as typeof globalThis.fetch;
+    const r = await turn(fetch, { sleep: async ms => void sleeps.push(ms) });
+    expect(sleeps).toEqual([45_000, 45_000]);
+    expect(r).toMatchObject({ text: 'Back', finish: 'stop', attempts: 3 });
+  });
+
+  it('with a Retry-After above 2 minutes is not waited for, and the error names the wait', async () => {
     const sleeps: number[] = [];
     const fetch = failing(429, '{"error":{"message":"Rate limit reached"}}', { 'retry-after': '900' });
     const r = await turn(fetch, { sleep: async ms => void sleeps.push(ms) });
-    expect(MAX_RETRY_AFTER_MS).toBe(15_000);
+    expect(MAX_RETRY_AFTER_MS).toBe(120_000);
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(sleeps).toEqual([]);
     expect(r.error?.message).toContain('Rate limit reached');
@@ -306,10 +388,10 @@ describe('a 429', () => {
   });
 
   it('a 503 with a long Retry-After is not waited for either', async () => {
-    const fetch = failing(503, 'busy', { 'retry-after': '60' });
+    const fetch = failing(503, 'busy', { 'retry-after': '600' });
     const r = await turn(fetch);
     expect(fetch).toHaveBeenCalledTimes(1);
-    expect(r.error?.message).toContain('60 seconds');
+    expect(r.error?.message).toContain('10 minutes');
   });
 });
 

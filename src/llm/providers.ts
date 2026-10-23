@@ -114,14 +114,20 @@ export function openAICompatibleBaseUrl(kind: ProviderKind, baseUrl?: string): s
 }
 
 /**
- * How long a model call may stay silent: until the server answers and sends its first output, and between outputs once
- * it has started. Generous, since a reasoning model can think a long time before it writes, and a local server loading
- * a model can take longer still.
+ * How long a model call may stay silent: until the server answers at all (`headersMs`), until it sends its first output
+ * (`firstChunkMs`), and between outputs once it has started (`chunkMs`). Generous, since a reasoning model that streams
+ * none of its thinking (OpenAI, Gemini, a high effort) is silent until its answer starts, which can take minutes, and
+ * a local server loading a model can take longer still. A server that never answers is told apart from one that is
+ * thinking: the first is retried, the second is not (see `streamTurn`).
  */
-export function modelTimeouts(spec: Pick<ModelSpec, 'kind' | 'baseUrl'>): { firstChunkMs: number; chunkMs: number } {
+export function modelTimeouts(spec: Pick<ModelSpec, 'kind' | 'baseUrl'>): {
+  headersMs: number;
+  firstChunkMs: number;
+  chunkMs: number;
+} {
   return isCloudEndpoint(spec.kind, spec.baseUrl)
-    ? { firstChunkMs: 180_000, chunkMs: 120_000 }
-    : { firstChunkMs: 600_000, chunkMs: 300_000 };
+    ? { headersMs: 180_000, firstChunkMs: 600_000, chunkMs: 120_000 }
+    : { headersMs: 600_000, firstChunkMs: 600_000, chunkMs: 300_000 };
 }
 
 /**
@@ -143,7 +149,7 @@ export function withHeaderTimeout(base: typeof fetch | undefined, ms: number): t
 
 export function createModel(spec: ModelSpec, options: CreateModelOptions = {}): ChatModel {
   const { kind, modelName, apiKey } = spec;
-  const fetch = withHeaderTimeout(options.fetch, modelTimeouts(spec).firstChunkMs);
+  const fetch = withHeaderTimeout(options.fetch, modelTimeouts(spec).headersMs);
   switch (kind) {
     case 'anthropic': {
       const anthropic = createAnthropic({
