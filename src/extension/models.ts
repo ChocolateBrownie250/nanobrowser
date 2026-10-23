@@ -10,6 +10,8 @@ import {
   learnt,
   LOCAL_KINDS,
   providersStorage,
+  removeLive,
+  setLive,
   settingsStorage,
   usableModel,
 } from '@src/store/settings';
@@ -19,13 +21,40 @@ import type { ResolvedModel } from '@src/agent/run';
 export class ModelUnavailable extends Error {}
 
 /**
+ * Pairs that storage.session refused (a full area), kept in memory so a run can still start with the model the user
+ * picked. A pair that is stored again later replaces its entry.
+ */
+const unstored = new Map<string, LivePair>();
+
+/** A conversation's live pair: the one kept in memory when storage refused it, else the stored one. */
+export async function loadLive(conversationId: string): Promise<LivePair | undefined> {
+  return unstored.get(conversationId) ?? (await getLive(conversationId));
+}
+
+/** Stores a live pair; a full storage area keeps it in memory instead of failing the caller. */
+export async function saveLive(conversationId: string, pair: LivePair): Promise<void> {
+  try {
+    await setLive(conversationId, pair);
+    unstored.delete(conversationId);
+  } catch (error) {
+    console.warn('[live] could not store the live pair; keeping it in memory', error);
+    unstored.set(conversationId, pair);
+  }
+}
+
+export async function dropLive(conversationId: string): Promise<void> {
+  unstored.delete(conversationId);
+  await removeLive(conversationId);
+}
+
+/**
  * The model and effort a run uses: the conversation's live pair, or one made from the settings when there is none. A
  * model no longer configured falls back as the panel's picker does, keeping the pair's effort. Null when no model is
  * configured. The key is read first, so a pair written after the call does not reach it.
  */
 export async function livePair(conversationId: string | null): Promise<LivePair | null> {
   const [stored, settings, providers] = await Promise.all([
-    conversationId ? getLive(conversationId) : undefined,
+    conversationId ? loadLive(conversationId) : undefined,
     settingsStorage.get(),
     providersStorage.get(),
   ]);

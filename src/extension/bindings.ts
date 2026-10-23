@@ -22,8 +22,15 @@ async function load(): Promise<ScopeState> {
   return cache;
 }
 
+// A full storage area (10 MB for the whole session) must not stop a tab from being bound: the map stays in memory, and
+// the next save tries again. It then does not survive a worker restart, which the user sees as an unbound tab.
 async function save(): Promise<void> {
-  if (cache) await chrome.storage.session.set({ [KEY]: cache });
+  if (!cache) return;
+  try {
+    await chrome.storage.session.set({ [KEY]: cache });
+  } catch (error) {
+    console.warn('[scope] could not store the tab map; keeping it in memory', error);
+  }
 }
 
 // Never red: a red group reads as an error.

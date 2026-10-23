@@ -2,8 +2,8 @@
 // chrome.downloads, and revokes the URL when the worker says the download ended. It uses only the runtime API.
 const urls = new Set<string>();
 
-chrome.runtime.onMessage.addListener((message, _sender, reply) => {
-  if (message?.target !== 'offscreen') return;
+chrome.runtime.onMessage.addListener((message, sender, reply) => {
+  if (sender.id !== chrome.runtime.id || message?.target !== 'offscreen') return;
   if (message.type === 'blob-url') {
     const url = URL.createObjectURL(new Blob([message.content as string], { type: message.mimeType as string }));
     urls.add(url);

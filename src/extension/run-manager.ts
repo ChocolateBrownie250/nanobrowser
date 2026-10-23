@@ -18,7 +18,6 @@ import {
   getRun,
   listRuns,
   newId,
-  putRun,
   setLeaf,
   getBlob,
   listBlobs,
@@ -26,7 +25,7 @@ import {
   titleFrom,
   updateConversation,
 } from '@src/store/conversations';
-import { DEFAULT_SETTINGS, getLive, removeLive, setLive, settingsStorage } from '@src/store/settings';
+import { DEFAULT_SETTINGS, settingsStorage } from '@src/store/settings';
 import { NOTE_LABEL, RunWriter } from '@src/agent/records';
 import { planRestore, RESTART_NOTE, takenOver } from '@src/agent/restore';
 import { runCompaction } from '@src/agent/compaction';
@@ -64,7 +63,8 @@ import type { ToolCallRequest } from '@src/llm';
 import type { DebtEntry } from '@src/agent/completion';
 import { Journal } from './journal';
 import type { Sink } from './journal';
-import { livePair, ModelUnavailable, resolveModel } from './models';
+import { dropLive, livePair, loadLive, ModelUnavailable, resolveModel, saveLive } from './models';
+import { beginRunRecord, patchRunRecord } from './run-record';
 import { count, deleteKeepingChoices, noteActivity, observe, runEnded, runModel, runStarted } from './analytics';
 import { endOf } from './analytics-payload';
 
@@ -73,6 +73,8 @@ export interface PanelConnection {
   conversationId: string | null;
   sink: Sink;
   unsubscribe?: () => void;
+  /** Aborts when the connection closes, so a card opened for this panel's command does not outlive it. */
+  closed?: AbortSignal;
 }
 
 interface ActiveRun {
@@ -132,9 +134,14 @@ export class RunManager {
     });
     // The layer's prompts for tabs a conversation's session holds come to the broker.
     addPromptRoute({ owns: tabId => this.#conversationOfSessionTab(tabId) !== null, prompt: this.broker.userPrompt() });
-    // Cancel on Chrome's debugger bar is Stop.
+    // Cancel on Chrome's debugger bar is Stop. Any other detach (the tab closed, DevTools took the tab) ends the wait
+    // of the cards that name the tab: an approval could no longer reach the page.
     chrome.debugger.onDetach.addListener((source, reason) => {
-      if (reason !== 'canceled_by_user' || source.tabId === undefined) return;
+      if (source.tabId === undefined) return;
+      if (reason !== 'canceled_by_user') {
+        this.broker.withdrawTab(source.tabId);
+        return;
+      }
       const conversationId = this.#conversationOfSessionTab(source.tabId);
       if (conversationId) this.#stop(conversationId);
     });
@@ -149,6 +156,8 @@ export class RunManager {
   /** The scope changed: the panels get the new list, and a session in a run gains or loses the tab. */
   async #scopeChanged(conversationId: string, added: number[], removed: number[]): Promise<void> {
     void this.border.tabsChanged(added, removed).catch(() => undefined);
+    // A tab that left the scope (closed, or unshared) ends the wait of the cards that name it.
+    for (const tabId of removed) this.broker.withdrawTab(tabId);
     const session = this.#sessions.get(conversationId);
     if (session) {
       for (const tabId of added) if (!session.hasTab(tabId)) await session.share(tabId).catch(() => undefined);
@@ -168,17 +177,12 @@ export class RunManager {
     return this.journal.hasSubscribers(conversationId) && (await this.scope.watching(conversationId));
   }
 
-  #queueWrites: Promise<void> = Promise.resolve();
-
   #emitQueue(conversationId: string, returned?: QueuedMessage[]): void {
     // The queue is kept in the run record too, so a worker restart hands it back to the composer.
     const items = [...(this.#queues.get(conversationId) ?? [])];
-    this.#queueWrites = this.#queueWrites
-      .then(async () => {
-        const run = await getRun(conversationId);
-        if (run && UNFINISHED.has(run.status)) await putRun({ ...run, steering: items });
-      })
-      .catch(() => undefined);
+    void patchRunRecord(conversationId, null, run => (UNFINISHED.has(run.status) ? { steering: items } : null)).catch(
+      () => undefined,
+    );
     this.emit(conversationId, {
       type: 'queue',
       items: [...(this.#queues.get(conversationId) ?? [])],
@@ -207,10 +211,10 @@ export class RunManager {
     const record = this.#records.get(conversationId);
     if (!record || !this.#runs.has(conversationId)) return;
     // The card a run waits on is kept in its record, so a restart knows what to open again. The hand-over's own record,
-    // with the call's partial result, is written by the loop.
-    const newest = this.broker.promptsOf(conversationId).at(-1);
-    const stored = await getRun(conversationId);
-    if (stored && stored.runId === record.runId && stored.pendingPrompt?.kind !== 'handover') {
+    // with the call's partial result, is written by the loop. The newest card is read when the write's turn comes.
+    await patchRunRecord(conversationId, record.runId, stored => {
+      if (stored.pendingPrompt?.kind === 'handover') return null;
+      const newest = this.broker.promptsOf(conversationId).at(-1);
       const pendingPrompt =
         newest?.kind === 'write-card'
           ? { kind: 'write-card' as const, request: newest.data, openedAt: newest.openedAt }
@@ -225,8 +229,8 @@ export class RunManager {
                 openedAt: newest.openedAt,
               }
             : undefined;
-      await putRun({ ...stored, pendingPrompt });
-    }
+      return { pendingPrompt };
+    });
     const status: RunStatus = open ? 'awaiting_user' : 'running';
     if (record.status !== status && (record.status === 'running' || record.status === 'awaiting_user')) {
       await this.#setStatus(record, status);
@@ -318,12 +322,21 @@ export class RunManager {
   async restore(): Promise<void> {
     for (const run of await listRuns()) {
       if (this.#runs.has(run.conversationId)) continue;
-      if (!(UNFINISHED.has(run.status) || takenOver(run))) {
-        // Restored before, and its queued messages have not reached a panel yet.
-        if (run.steering.length) this.#returned.set(run.conversationId, run.steering);
+      if (run.status === 'interrupted' || !(UNFINISHED.has(run.status) || takenOver(run))) {
+        // Restored before (an interrupted run waits for Resume; there is nothing to write again, not even a newer
+        // `updatedAt`), and its queued messages may not have reached a panel yet.
+        if (run.steering.length) {
+          this.#returned.set(run.conversationId, run.steering);
+          this.#handBack(
+            run.conversationId,
+            [...this.connections].find(c => c.conversationId === run.conversationId),
+          );
+        }
         continue;
       }
       const conversationId = run.conversationId;
+      // The status event below must come after the stored window, or a panel that reconnects would miss it.
+      await this.journal.ready(conversationId);
       const branch = await activeBranch(conversationId);
       const plan = planRestore(run, branch);
       const writer = new RunWriter(conversationId, run.runId);
@@ -343,17 +356,20 @@ export class RunManager {
       if (!noted && (plan.results.length > 0 || plan.reopen || run.status === 'running'))
         await writer.appNote(plan.note);
       if (run.steering.length) this.#returned.set(conversationId, run.steering);
-      const record: RunRecord = {
-        ...run,
+      // Merged into the stored record, which the writes above and a panel's Resume may have changed meanwhile.
+      const record = await patchRunRecord(conversationId, run.runId, stored => ({
         status: plan.status,
         reason: plan.reason,
-        pendingPrompt: plan.reopen ? run.pendingPrompt : undefined,
-      };
-      await putRun(record);
-      // A run the restart ended is counted once, as interrupted; one already interrupted was counted before.
-      if (plan.status === 'interrupted' && run.status !== 'interrupted') runEnded(record, {});
-      await updateConversation(conversationId, { status: plan.status });
-      await this.scope.status(conversationId, plan.status, (await getConversation(conversationId))?.title ?? '');
+        pendingPrompt: plan.reopen ? stored.pendingPrompt : undefined,
+      }));
+      if (!record || record.runId !== run.runId) continue;
+      // A run the restart ended is counted once, as interrupted.
+      if (plan.status === 'interrupted') runEnded(record, {});
+      // The restart is not the user's activity: the conversation keeps its place in Recent tasks.
+      const conversation = await getConversation(conversationId);
+      if (conversation)
+        await updateConversation(conversationId, { status: plan.status, updatedAt: conversation.updatedAt });
+      await this.scope.status(conversationId, plan.status, conversation?.title ?? '');
       // A panel that subscribed before the restore got the stored status; it gets the restored one, and the queued
       // messages, now.
       this.emit(conversationId, {
@@ -371,10 +387,14 @@ export class RunManager {
     await this.#watchdog();
   }
 
-  /** One alarm, while any run is unfinished, wakes the worker so an interrupted run is found. */
+  /**
+   * One alarm, while any run is working or waiting for the user, wakes the worker so a run that died is found. An
+   * interrupted run waits for the user and needs no wake-up.
+   */
   async #watchdog(): Promise<void> {
     if (!globalThis.chrome?.alarms) return;
-    const unfinished = this.#runs.size > 0 || (await listRuns()).some(r => UNFINISHED.has(r.status));
+    const unfinished =
+      this.#runs.size > 0 || (await listRuns()).some(r => r.status === 'running' || r.status === 'awaiting_user');
     if (unfinished) await chrome.alarms.create('nb-watchdog', { periodInMinutes: 0.5 });
     else await chrome.alarms.clear('nb-watchdog');
   }
@@ -424,11 +444,9 @@ export class RunManager {
           true,
           partial,
         );
-        await this.#setStatus(
-          { ...record, pendingPrompt: undefined },
-          'interrupted',
-          'The tab of the hand-over is gone.',
-        );
+        await this.#setStatus({ ...record }, 'interrupted', 'The tab of the hand-over is gone.', {
+          pendingPrompt: undefined,
+        });
         return;
       }
       let text: string;
@@ -456,7 +474,9 @@ export class RunManager {
           .join('\n');
       }
       await writer.toolResult(toolCallId, toolName, text, answer !== 'given-back', partial);
-      await putRun({ ...record, pendingPrompt: undefined });
+      // Withdrawn with the tab still there: the user pressed Stop.
+      if (answer === 'withdrawn') return this.#endStopped(conversationId, record, writer);
+      await patchRunRecord(conversationId, record.runId, { pendingPrompt: undefined });
       if (answer === 'given-back' || answer === 'cancelled') this.#launch(conversationId, record);
       return;
     }
@@ -474,9 +494,35 @@ export class RunManager {
         ? ['ask_user · the user continued', ...(answer.data !== undefined ? [`answer: ${answer.data}`] : [])].join('\n')
         : 'error USER_DECLINED (nothing dispatched)\nThe user cancelled the step.';
       await writer.toolResult(toolCallId, toolName, text, !continued);
-      await putRun({ ...record, pendingPrompt: undefined });
-      if (answer !== 'withdrawn') this.#launch(conversationId, record);
+      if (answer === 'withdrawn') {
+        // The tab closed, or the user pressed Stop.
+        const tab = tabId !== undefined ? await chrome.tabs.get(tabId).catch(() => null) : null;
+        if (tabId !== undefined && !tab) {
+          await this.#setStatus({ ...record }, 'interrupted', 'The tab of the question is gone.', {
+            pendingPrompt: undefined,
+          });
+          return;
+        }
+        return this.#endStopped(conversationId, record, writer);
+      }
+      await patchRunRecord(conversationId, record.runId, { pendingPrompt: undefined });
+      this.#launch(conversationId, record);
     }
+  }
+
+  /**
+   * A restored card was withdrawn by Stop: the run ends as stopped, the way a run in this worker does, so the panel
+   * does not wait for a card that is gone.
+   */
+  async #endStopped(conversationId: string, record: RunRecord, writer: RunWriter): Promise<void> {
+    // A conversation deleted meanwhile has nothing left to write to.
+    if (!(await getConversation(conversationId))) return;
+    await this.#notice(conversationId, STOPPED_BY_USER, 'info');
+    await writer.appNote(STOPPED_NOTE);
+    const ended = { ...record };
+    await this.#setStatus(ended, 'stopped', undefined, { pendingPrompt: undefined });
+    runEnded(ended, {});
+    await this.#watchdog();
   }
 
   async handle(connection: PanelConnection, command: PanelCommand): Promise<void> {
@@ -663,6 +709,8 @@ export class RunManager {
       return;
     }
     await this.journal.ready(conversationId);
+    // Read before the subscription, so a status change after it reaches the panel as an event and cannot be overtaken.
+    const stored = sinceSeq !== undefined ? await getRun(conversationId) : undefined;
     // A later subscribe of the same panel, made while this one waited, has the last word.
     if (connection.conversationId !== conversationId) return;
     // Another subscribe to the same conversation may have finished meanwhile; its subscription goes.
@@ -673,6 +721,17 @@ export class RunManager {
     const missed = sinceSeq !== undefined ? this.journal.since(conversationId, sinceSeq) : null;
     if (missed) {
       for (const event of missed) connection.sink(event);
+      // The window may not hold the status the run has now (a worker restart ended the run after the panel's last
+      // event): a panel that reconnects is told it, when the replay does not say it already.
+      const shown = [...missed].reverse().find(e => e.type === 'run_status');
+      if (stored && (!shown || shown.status !== stored.status)) {
+        this.journal.direct(conversationId, connection.sink, {
+          type: 'run_status',
+          status: stored.status,
+          reason: stored.reason,
+          startedAt: stored.startedAt,
+        });
+      }
       const streaming = this.journal.streaming(conversationId);
       if (streaming) this.journal.direct(conversationId, connection.sink, { type: 'message_update', ...streaming });
       return;
@@ -696,12 +755,9 @@ export class RunManager {
     if (!returned?.length || !connection) return;
     this.#returned.delete(conversationId);
     this.journal.direct(conversationId, connection.sink, { type: 'queue', items: [], returned });
-    this.#queueWrites = this.#queueWrites
-      .then(async () => {
-        const run = await getRun(conversationId);
-        if (run?.steering.length && !this.#runs.has(conversationId)) await putRun({ ...run, steering: [] });
-      })
-      .catch(() => undefined);
+    void patchRunRecord(conversationId, null, run =>
+      run.steering.length && !this.#runs.has(conversationId) ? { steering: [] } : null,
+    ).catch(() => undefined);
   }
 
   async #history(connection: PanelConnection, query?: string): Promise<void> {
@@ -763,7 +819,9 @@ export class RunManager {
     const showing = [...this.connections].filter(c => c.conversationId === conversationId);
     await this.scope.release(conversationId, closeAgentTabs);
     await deleteConversation(conversationId);
-    await removeLive(conversationId);
+    // A card restored after a worker restart has no run to end it.
+    this.broker.withdrawAll(conversationId);
+    await dropLive(conversationId);
     for (const connection of showing) {
       if (connection.tabId !== null) await this.#subscribe(connection, connection.tabId, null);
     }
@@ -781,7 +839,7 @@ export class RunManager {
 
   async snapshot(conversationId: string): Promise<PanelEventBody> {
     const conversation = (await getConversation(conversationId)) ?? null;
-    const live = await getLive(conversationId);
+    const live = await loadLive(conversationId);
     const branch = await activeBranch(conversationId);
     const run = await getRun(conversationId);
     return {
@@ -818,7 +876,7 @@ export class RunManager {
     if (!conversation) {
       conversation = await createConversation({ mode: command.mode, tabs: [command.tabId] });
       // The live pair is written before the conversation's state is published.
-      if (command.model) await setLive(conversation.id, { model: command.model, reasoning: command.reasoning });
+      if (command.model) await saveLive(conversation.id, { model: command.model, reasoning: command.reasoning });
       await this.#subscribe(connection, command.tabId, conversation.id);
       await this.scope.add(conversation.id, command.tabId, 'start', { move: true });
     }
@@ -876,7 +934,8 @@ export class RunManager {
     // What happened to the files is said after the message they came with.
     for (const warning of warnings) await this.#notice(conversationId, warning, 'warn');
     if (startUrl) await openStartPage(command.tabId, startUrl);
-    // The run takes the pair this message carried, whatever was chosen since.
+    // The run takes the pair this message carried, whatever was chosen since. If another start won meanwhile, this
+    // message is already in the conversation, and that run reads it at its next turn.
     this.#launch(
       conversationId,
       undefined,
@@ -1029,7 +1088,7 @@ export class RunManager {
         isError: true,
       };
     }
-    const saved = await saveText({ filename: check.filename, content, mimeType: check.mimeType }, saveAs).catch(
+    const saved = await saveText({ filename: check.filename, content, mimeType: check.mimeType }, saveAs, signal).catch(
       (error: Error) => ({ state: 'interrupted' as const, error: error.message, name: check.filename, downloadId: -1 }),
     );
     if (saved.state !== 'complete') {
@@ -1160,9 +1219,12 @@ export class RunManager {
 
   async #setMode(conversationId: string, mode: Conversation['mode']): Promise<void> {
     const conversation = await getConversation(conversationId);
-    if (!conversation || conversation.mode === mode) return;
+    if (!conversation) return;
+    // A run that is starting or going on follows the user's latest choice, whatever it read when it began.
+    if (this.#runs.has(conversationId)) this.#modes.set(conversationId, mode);
+    if (conversation.mode === mode) return;
     const updated = await updateConversation(conversationId, { mode });
-    if (this.#modes.has(conversationId)) this.#modes.set(conversationId, mode);
+    if (this.#runs.has(conversationId)) this.#modes.set(conversationId, mode);
     await appendEntry(conversationId, { type: 'mode_change', mode });
     if (updated) this.emit(conversationId, { type: 'conversation', conversation: updated });
   }
@@ -1184,9 +1246,9 @@ export class RunManager {
       reasoning: p.reasoning,
     });
     const next = pairOf(pair);
-    const stored = await getLive(conversationId);
+    const stored = await loadLive(conversationId);
     if (stored && JSON.stringify(pairOf(stored)) === JSON.stringify(next)) return;
-    await setLive(conversationId, next);
+    await saveLive(conversationId, next);
     this.emit(conversationId, { type: 'live', pair: next });
   }
 
@@ -1207,7 +1269,7 @@ export class RunManager {
         conversationId,
         'confirm',
         { question: 'move-tab', title: tab?.title ?? '' },
-        new AbortController().signal,
+        connection.closed ?? new AbortController().signal,
         { tabId },
       );
       if (answer !== 'yes') return false;
@@ -1227,10 +1289,27 @@ export class RunManager {
     return true;
   }
 
-  async #setStatus(record: RunRecord, status: RunStatus, reason?: string): Promise<void> {
+  /**
+   * A status change: the run record's status and reason, with whatever else the run manager owns (`extra`), merged into
+   * the stored record. The loop and the card writes keep their own fields there (turns, debt, guards, the pending card,
+   * the queue), so the whole record is never written back from this copy.
+   */
+  async #setStatus(
+    record: RunRecord,
+    status: RunStatus,
+    reason?: string,
+    extra: Partial<RunRecord> = {},
+  ): Promise<void> {
+    Object.assign(record, extra);
     record.status = status;
     record.reason = reason;
-    await putRun(record);
+    await patchRunRecord(record.conversationId, record.runId, {
+      ...extra,
+      status,
+      reason,
+      tabs: record.tabs,
+      ...(record.model ? { model: record.model } : {}),
+    });
     const conversation = await updateConversation(record.conversationId, { status });
     this.emit(record.conversationId, { type: 'run_status', status, reason, startedAt: record.startedAt });
     await this.scope.status(record.conversationId, status, conversation?.title ?? '');
@@ -1252,9 +1331,12 @@ export class RunManager {
 
   /**
    * Starts a run. Its model and effort are the pair given (the message's), or the live pair read now, before anything
-   * awaits, so a choice made while the run starts applies to the next run.
+   * awaits, so a choice made while the run starts applies to the next run. A conversation has one run: when it already
+   * has one (two panels started it together), nothing starts and the result is false. The check and the entry in `#runs`
+   * happen in one step, with no await between them.
    */
-  #launch(conversationId: string, restore?: RunRecord, pair?: LivePair): void {
+  #launch(conversationId: string, restore?: RunRecord, pair?: LivePair): boolean {
+    if (this.#runs.has(conversationId)) return false;
     const starting = pair ? Promise.resolve(pair) : livePair(conversationId);
     starting.catch(() => undefined);
     const controller = new AbortController();
@@ -1262,6 +1344,9 @@ export class RunManager {
     let loopRef: AgentLoop | undefined;
     const done = (async () => {
       const conversation = (await getConversation(conversationId))!;
+      // The mode the run starts with is the stored one as read now; a change made after this point reaches `#modes`
+      // through `#setMode`, and a change made before it is in the conversation just read.
+      this.#modes.set(conversationId, conversation.mode);
       const now = new Date().toISOString();
       const record: RunRecord = {
         conversationId,
@@ -1281,6 +1366,7 @@ export class RunManager {
       noteActivity('run');
       // Counted here, before the model resolves, since every run that starts is counted when it ends.
       void count('runs.started');
+      await beginRunRecord(record);
       await this.#setStatus(record, 'running');
       let end: LoopEnd | undefined;
       try {
@@ -1289,10 +1375,15 @@ export class RunManager {
         record.model = await runModel(model.ref);
         if (record.model) {
           // Written now, so a run the restart cuts still counts its model's outcome.
-          await putRun(record);
-          void runStarted(record.model, model.reasoning, conversation.mode, model.profile.vision, this.#runs.size > 1);
+          await patchRunRecord(conversationId, runId, { model: record.model });
+          void runStarted(
+            record.model,
+            model.reasoning,
+            this.#modes.get(conversationId) ?? conversation.mode,
+            model.profile.vision,
+            this.#runs.size > 1,
+          );
         }
-        this.#modes.set(conversationId, conversation.mode);
         const session = await this.#openSession(conversationId);
         record.tabs = session.tabIds();
         const tools = toolsForRun({ vision: model.profile.vision });
@@ -1327,25 +1418,27 @@ export class RunManager {
         loopRef = loop;
         loop.hasSteering = () => (this.#queues.get(conversationId)?.length ?? 0) > 0;
         end = await loop.run();
-        record.turns += end.turns;
-        record.usage = addUsage(record.usage, end.usage);
-        record.outcome = end.outcome;
-        record.debt = loop.debt;
-        record.guards = loop.guards.state;
+        const final: Partial<RunRecord> = {
+          turns: record.turns + end.turns,
+          usage: addUsage(record.usage, end.usage),
+          outcome: end.outcome,
+          debt: loop.debt,
+          guards: loop.guards.state,
+        };
         if (end.status === 'failed' && end.reason) await this.#notice(conversationId, end.reason, 'error');
         if (end.status === 'stopped') {
           await this.#notice(conversationId, STOPPED_BY_USER, 'info');
           await new RunWriter(conversationId, runId).appNote(STOPPED_NOTE);
         }
-        await this.#setStatus(record, end.status, end.reason);
+        // The run's own totals are written with its last status; the record in storage keeps the rest as it is.
+        await this.#setStatus(record, end.status, end.reason, final);
         if (end.status !== 'stopped' && !(await this.#inView(conversationId))) {
           await notifyFinished(conversationId, end.outcome === 'success', (await this.scope.tabsOf(conversationId))[0]);
         }
       } catch (error) {
         const message = error instanceof ModelUnavailable ? error.message : `The run failed: ${String(error)}`;
         await this.#notice(conversationId, message, 'error');
-        record.outcome = 'failed';
-        await this.#setStatus(record, 'failed', message);
+        await this.#setStatus(record, 'failed', message, { outcome: 'failed' });
       } finally {
         runEnded(record, end ?? {});
         // A run that finished well counts towards the card that asks for a store rating.
@@ -1354,6 +1447,7 @@ export class RunManager {
         }
         this.#runs.delete(conversationId);
         this.#records.delete(conversationId);
+        this.#modes.delete(conversationId);
         this.broker.withdrawAll(conversationId);
         // When a run ends the debugger is detached; the next run attaches again and starts fresh.
         await this.#closeSession(conversationId);
@@ -1366,6 +1460,7 @@ export class RunManager {
     this.#runs.set(conversationId, { runId, controller, done });
     void this.#watchdog();
     void done.then(() => this.#watchdog());
+    return true;
   }
 
   async #sendQueued(conversationId: string): Promise<void> {

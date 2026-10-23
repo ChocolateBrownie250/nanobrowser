@@ -14,9 +14,11 @@ export function listenForPanels(manager: RunManager): void {
       return;
     }
     let open = true;
+    const closed = new AbortController();
     const connection: PanelConnection = {
       tabId: null,
       conversationId: null,
+      closed: closed.signal,
       sink: (event: PanelEvent) => {
         if (open) port.postMessage(event);
       },
@@ -24,6 +26,8 @@ export function listenForPanels(manager: RunManager): void {
     manager.connections.add(connection);
     port.onDisconnect.addListener(() => {
       open = false;
+      // A card opened for one of this panel's commands (moving a tab) ends with it.
+      closed.abort();
       manager.connections.delete(connection);
       connection.unsubscribe?.();
     });
