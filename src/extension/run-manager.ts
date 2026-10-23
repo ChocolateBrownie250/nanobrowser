@@ -19,9 +19,11 @@ import {
   listRuns,
   newId,
   setLeaf,
+  deleteBlob,
   getBlob,
   listBlobs,
   putBlob,
+  sweepOrphanBlobs,
   titleFrom,
   updateConversation,
 } from '@src/store/conversations';
@@ -67,6 +69,9 @@ import { dropLive, livePair, loadLive, ModelUnavailable, resolveModel, saveLive 
 import { beginRunRecord, patchRunRecord } from './run-record';
 import { count, deleteKeepingChoices, noteActivity, observe, runEnded, runModel, runStarted } from './analytics';
 import { endOf } from './analytics-payload';
+
+/** A file added in a composer and never sent is removed after this long. */
+const ORPHAN_BLOB_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 export interface PanelConnection {
   tabId: number | null;
@@ -148,7 +153,10 @@ export class RunManager {
     // A site the user blocks is refused in every open session at once.
     this.permissions.onBlockedChange(() => {
       for (const session of this.#sessions.values()) {
-        void session.setUrlPolicy({ allow: [], deny: [], blocked: this.permissions.blockedSites() });
+        // A rejected policy sync leaves the tab disconnected; the next call reconnects it under the new policy.
+        session
+          .setUrlPolicy({ allow: [], deny: [], blocked: this.permissions.blockedSites() })
+          .catch(error => console.warn('[run-manager] URL policy sync failed', error));
       }
     });
   }
@@ -320,6 +328,8 @@ export class RunManager {
    * answers it, or presses Resume.
    */
   async restore(): Promise<void> {
+    // Files added in a composer and never sent (the panel closed, or a send did not take them) are removed after a day.
+    void sweepOrphanBlobs(ORPHAN_BLOB_MAX_AGE_MS).catch(() => undefined);
     for (const run of await listRuns()) {
       if (this.#runs.has(run.conversationId)) continue;
       if (run.status === 'interrupted' || !(UNFINISHED.has(run.status) || takenOver(run))) {
@@ -964,17 +974,24 @@ export class RunManager {
       const blob = await getBlob(ref.id);
       if (!blob || (blob.conversationId && blob.conversationId !== conversationId)) continue;
       const kind = attachmentKind(blob.name, blob.mimeType);
+      // A refused file that no conversation holds yet is deleted now, so it does not sit in the store until the sweep.
+      const discard = async () => {
+        if (!blob.conversationId) await deleteBlob(blob.id).catch(() => undefined);
+      };
       if ('refused' in kind) {
         warnings.push(`${blob.name}: ${kind.refused}`);
+        await discard();
         continue;
       }
       if (blob.size > MAX_FILE) {
         warnings.push(`${blob.name} is larger than 25 MB and was not attached.`);
+        await discard();
         continue;
       }
       if (blob.conversationId !== conversationId) {
         if (total + blob.size > MAX_CONVERSATION) {
           warnings.push(`${blob.name} was not attached: a conversation holds at most 100 MB of files.`);
+          await discard();
           continue;
         }
         total += blob.size;

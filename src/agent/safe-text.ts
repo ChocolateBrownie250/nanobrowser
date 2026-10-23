@@ -5,8 +5,8 @@ import { defuse, quote } from '@src/browser-control';
 /**
  * The extension's own labels, defused wherever page text holds them. The layer's session defuses them inside the
  * `text` of every result; the strings the agent re-renders from structured results (tab titles, addresses, targets,
- * dialog text) go through here so they get the same treatment. Keep it equal to the session's list
- * (`AGENT_LABELS` in src/extension/agent-session.ts).
+ * dialog text) go through here so they get the same treatment. The extension's session (src/extension/agent-session.ts)
+ * takes its list from here, so the two cannot differ.
  */
 export const AGENT_LABELS: readonly string[] = [
   '[Nanobrowser note',

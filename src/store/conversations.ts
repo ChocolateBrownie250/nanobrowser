@@ -180,6 +180,60 @@ export async function putRun(run: RunRecord): Promise<void> {
   await (await db()).put('runs', { ...run, updatedAt: now() });
 }
 
+/** What a patch of a run record may be: fields to set, or a function of the stored row that says them (null: nothing). */
+export type RunPatch = Partial<RunRecord> | ((stored: RunRecord) => Partial<RunRecord> | null);
+
+// A run's record is one row per conversation with several writers (the run manager, the card a run waits on, the
+// queue, the loop). Their writes run one after another per conversation, each as a single transaction, so a writer
+// never puts back a copy it read earlier.
+const runChains = new Map<string, Promise<unknown>>();
+
+/** Runs the work after the earlier writes of the same conversation, whether or not they failed. */
+function inRunOrder<T>(conversationId: string, work: () => Promise<T>): Promise<T> {
+  const next = (runChains.get(conversationId) ?? Promise.resolve()).then(work, work);
+  const tail = next.catch(() => undefined);
+  runChains.set(conversationId, tail);
+  void tail.then(() => {
+    if (runChains.get(conversationId) === tail) runChains.delete(conversationId);
+  });
+  return next;
+}
+
+/** A new run's record replaces the row of the run before it. */
+export function beginRun(record: RunRecord): Promise<void> {
+  return inRunOrder(record.conversationId, async () => {
+    await (await db()).put('runs', { ...record, updatedAt: now() });
+  });
+}
+
+/**
+ * Merges a patch into the stored record of run `runId` (any run when `runId` is null) and returns the result. A row
+ * that is gone, or belongs to another run, is left alone: a run that ended cannot write over the one that followed it.
+ */
+export function patchRun(
+  conversationId: string,
+  runId: string | null,
+  patch: RunPatch,
+): Promise<RunRecord | undefined> {
+  return inRunOrder(conversationId, async () => {
+    const tx = (await db()).transaction('runs', 'readwrite');
+    const stored = await tx.store.get(conversationId);
+    if (!stored || (runId !== null && stored.runId !== runId)) {
+      await tx.done;
+      return stored;
+    }
+    const fields = typeof patch === 'function' ? patch(stored) : patch;
+    if (!fields) {
+      await tx.done;
+      return stored;
+    }
+    const next: RunRecord = { ...stored, ...fields, updatedAt: now() };
+    await tx.store.put(next);
+    await tx.done;
+    return next;
+  });
+}
+
 export async function listRuns(): Promise<RunRecord[]> {
   return (await db()).getAll('runs');
 }

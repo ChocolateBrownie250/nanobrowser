@@ -3,7 +3,7 @@
 // never dispatched before its intent is on disk), the tool result when it returns, with the layer's structured result
 // beside the text the model saw.
 import type { Result } from '@src/browser-control';
-import { appendEntry, getRun, putRun } from '@src/store/conversations';
+import { appendEntry, patchRun } from '@src/store/conversations';
 import type {
   Entry,
   EntryOf,
@@ -123,13 +123,12 @@ export class RunWriter {
     return appendEntry(this.conversationId, { type: 'mode_change', mode });
   }
 
-  /** Updates the run record with a patch, keeping what is not in it. */
-  async run(patch: Partial<RunRecord>): Promise<RunRecord | undefined> {
-    const current = await getRun(this.conversationId);
-    if (!current || current.runId !== this.runId) return current;
-    const next = { ...current, ...patch };
-    await putRun(next);
-    return next;
+  /**
+   * Updates the run record with a patch, keeping what is not in it. The patch is merged into the stored row in one
+   * transaction, in order with the worker's own writes to the same row, so it cannot put back an older status.
+   */
+  run(patch: Partial<RunRecord>): Promise<RunRecord | undefined> {
+    return patchRun(this.conversationId, this.runId, patch);
   }
 }
 

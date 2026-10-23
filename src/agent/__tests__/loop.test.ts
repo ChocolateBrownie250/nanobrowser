@@ -273,10 +273,19 @@ describe('the loop', () => {
   });
 
   it('does not call a reply the provider filtered, or ended for another reason, a success', async () => {
-    const filtered = await setup([{ finish: 'content-filter' }]);
-    expect(await filtered.loop.run()).toMatchObject({
+    // With no text at all the stream layer already reports the stop as an error; the loop's own wording covers a
+    // filtered reply that still carries text.
+    const empty = await setup([{ finish: 'content-filter' }]);
+    expect(await empty.loop.run()).toMatchObject({
       status: 'failed',
       outcome: 'failed',
+      reason: expect.stringContaining('stopped without an answer'),
+      cause: 'provider',
+    });
+    const filtered = await setup([{ text: 'I cannot', finish: 'content-filter' }]);
+    expect(await filtered.loop.run()).toMatchObject({
+      status: 'failed',
+      outcome: 'partial',
       reason: FILTERED_REPLY,
       cause: 'provider',
     });

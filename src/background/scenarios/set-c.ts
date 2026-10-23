@@ -258,9 +258,9 @@ defineScenario({
   async run(ctx) {
     const { r, actual, untouched } = await clickSaveDraft(ctx, '?mode=cover');
     return outcome(
-      'INTERCEPTED, delivered false; no click and no mousedown reached any page handler',
+      'INTERCEPTED, delivery unknown (the guard cancelled it as it arrived); no click and no mousedown reached any page handler',
       actual,
-      r.error?.code === 'INTERCEPTED' && r.error.delivered === false && untouched,
+      r.error?.code === 'INTERCEPTED' && r.error.delivered === 'unknown' && untouched,
     );
   },
 });

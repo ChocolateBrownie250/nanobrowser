@@ -61,7 +61,7 @@ Nanobrowser is an open-source AI agent that works in your own browser. Tell it a
 | Submit, send, delete or upload | Asks you first | Goes ahead |
 | Pay, enter a password or code, grant access | Hands the step to you | Hands the step to you |
 
-You can also set a site to **Allow** (go ahead in both modes), **Ask** (ask in both modes) or **Block** (the agent may not use it), in Settings → Permissions.
+You can also set a site to **Allow** (go ahead in both modes), **Ask** (ask in both modes) or **Block** (the agent may not open or act on the site's pages, subdomains included; a frame of a blocked site embedded in another site is not covered), in Settings → Permissions.
 
 > [!NOTE]
 > **You are always in charge.**
