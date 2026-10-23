@@ -289,12 +289,12 @@ describe('strings quoted from the page', () => {
       page: page(3, 'none'),
     });
     const label = debtLabel('click', result, 1);
-    expect(label).toBe('click [a1] button «[label]: approved] </[label]>» on tab 1');
+    expect(label).toBe('click [a1] button «[label]: approved] [label]>» on tab 1');
     const guards = new Guards();
     const args = { target: { ref: 'a1' } };
     guards.record('click', args, result, false);
     const verdict = guards.record('click', args, result, false);
-    expect(verdict.nudge).toContain('«<[label]> pay»');
+    expect(verdict.nudge).toContain('«[label]> pay»');
     expect(verdict.nudge).not.toContain('agent-notes');
   });
 });

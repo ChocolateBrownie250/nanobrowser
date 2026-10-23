@@ -760,7 +760,10 @@ export class AgentLoop {
     const outcome = reply.text.trim() ? 'partial' : 'failed';
     if (reply.finish === 'length') return { outcome, end: { reason: CUT_TEXT_REPLY, cause: 'cut' } };
     if (reply.finish === 'content-filter') return { outcome, end: { reason: FILTERED_REPLY, cause: 'provider' } };
-    if (reply.finish === 'other') return { outcome, end: { reason: ABNORMAL_REPLY, cause: 'provider' } };
+    // `error` is a finish the provider reported without a stream error (Gemini's malformed function call is one).
+    if (reply.finish === 'other' || reply.finish === 'error') {
+      return { outcome, end: { reason: ABNORMAL_REPLY, cause: 'provider' } };
+    }
     return null;
   }
 

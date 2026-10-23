@@ -425,6 +425,29 @@ describe('files sent with a message', () => {
   });
 });
 
+describe('a quote sent with a message', () => {
+  it('is cut at 20,000 characters without leaving half of an emoji', async () => {
+    const manager = await newManager();
+    const conversation = await s.createConversation({ mode: 'ask', tabs: [1] });
+    await manager.scope.add(conversation.id, 1, 'start');
+    // The 20,000th unit is the first half of a surrogate pair.
+    const text = `${'a'.repeat(19_999)}😀tail`;
+    await manager.handle(connection, {
+      ...send(conversation.id, 'what is this'),
+      context: [{ kind: 'selection', text, url: 'https://x.test/', title: 'X' }],
+    });
+    await until(
+      () => manager.isRunning(conversation.id),
+      r => !r,
+      'run ends',
+    );
+    const quotes = (await s.activeBranch(conversation.id)).flatMap(e =>
+      e.type === 'message' ? e.message.parts.flatMap(p => (p.type === 'selection' ? [p.text] : [])) : [],
+    );
+    expect(quotes).toEqual(['a'.repeat(19_999)]);
+  });
+});
+
 describe('a message that lost the race to start a run', () => {
   it('is answered by a run of its own when the winning run ended without reading it', async () => {
     const manager = await newManager();

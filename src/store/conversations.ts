@@ -18,7 +18,11 @@ export function newId(): string {
 export function titleFrom(text: string): string {
   const line = text.replace(/\s+/g, ' ').trim();
   if (line.length <= TITLE_LENGTH) return line;
-  return `${line.slice(0, TITLE_LENGTH - 1).trimEnd()}…`;
+  // The cut never falls between the two halves of a surrogate pair (an emoji at the cut would leave a lone half).
+  let end = TITLE_LENGTH - 1;
+  const before = line.charCodeAt(end - 1);
+  if (before >= 0xd800 && before <= 0xdbff) end--;
+  return `${line.slice(0, end).trimEnd()}…`;
 }
 
 /**

@@ -33,6 +33,7 @@ import { planRestore, RESTART_NOTE, takenOver } from '@src/agent/restore';
 import { runCompaction } from '@src/agent/compaction';
 import { attachmentKind, MAX_CONVERSATION, MAX_FILE } from '@src/agent/attachments';
 import { toModelMessages } from '@src/agent/context';
+import { agentQuote, safeHead } from '@src/agent/safe-text';
 import type {
   Conversation,
   EntryOf,
@@ -55,7 +56,7 @@ import { thumbnail } from './thumbnail';
 import { isNumberedCopy, saveText } from './downloads';
 import { checkSave } from '@src/agent/save-file';
 import { conversationMarkdown, exportName } from '@src/agent/export';
-import { isBlockedSite, quote } from '@src/browser-control';
+import { isBlockedSite } from '@src/browser-control';
 import { clearShortcuts, isStartUrl } from '@src/store/shortcuts';
 import { OLD_KEYS, UPGRADE_KEY, deleteOldChats } from '@src/store/legacy';
 import { upgradeFromOldVersion } from './upgrade';
@@ -923,7 +924,7 @@ export class RunManager {
     // Quotes from "Ask Nanobrowser about this" go with the message, as page text.
     const quotes = command.context.flatMap(c =>
       c.kind === 'selection'
-        ? [{ type: 'selection' as const, text: c.text.slice(0, 20_000), url: c.url, title: c.title }]
+        ? [{ type: 'selection' as const, text: safeHead(c.text, 20_000), url: c.url, title: c.title }]
         : [],
     );
     if (!text && !files.length && !quotes.length) {
@@ -1161,10 +1162,10 @@ export class RunManager {
       saved.name === check.filename
         ? ''
         : isNumberedCopy(saved.name, check.filename)
-          ? `; a file named ${quote(check.filename, 120)} was already there, so a number was added`
-          : `; it was saved under that name instead of ${quote(check.filename, 120)}`;
+          ? `; a file named ${agentQuote(check.filename, 120)} was already there, so a number was added`
+          : `; it was saved under that name instead of ${agentQuote(check.filename, 120)}`;
     return {
-      text: `save_file · saved ${quote(saved.name, 120)} (${check.bytes} bytes)${saveAs ? '' : ' in the Downloads folder'}${note}.`,
+      text: `save_file · saved ${agentQuote(saved.name, 120)} (${check.bytes} bytes)${saveAs ? '' : ' in the Downloads folder'}${note}.`,
       isError: false,
     };
   }

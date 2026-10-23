@@ -10,9 +10,12 @@ import { defuse, quote } from '@src/browser-control';
  */
 export const AGENT_LABELS: readonly string[] = [
   '[Nanobrowser note',
-  'browser-state',
-  'agent-notes',
-  'custom-instructions',
+  '<browser-state',
+  '</browser-state',
+  '<agent-notes',
+  '</agent-notes',
+  '<custom-instructions',
+  '</custom-instructions',
 ];
 
 /** Page text with the extension's labels and the boundary marker's shape defused. */

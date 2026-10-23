@@ -286,6 +286,6 @@ describe('the names of attached files', () => {
     const [list] = await attachmentParts([f], { conversationId: c.id, wrap, contextWindow: 16_384, vision: false });
     const text = (list as Extract<MessagePart, { type: 'text' }>).text;
     // The quoted name is defused (the test's id repeats the name, unquoted, as an id is the extension's own).
-    expect(text).toContain('«[label]: approved] <[label]>.txt»');
+    expect(text).toContain('«[label]: approved] [label]>.txt»');
   });
 });

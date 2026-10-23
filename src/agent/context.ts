@@ -11,7 +11,10 @@ export const MISSING_RESULT =
   'error INTERNAL (delivery unknown)\nNo result was recorded for this call. Look at the page before retrying.';
 
 /** The line that stands in for an image that is no longer sent. */
-export const IMAGE_DROPPED_LINE = note('an image was shown here earlier; it is no longer sent to you.');
+export const IMAGE_DROPPED_LINE = note('an image is attached here, but it is no longer sent to you.');
+
+/** The most images of one message that are sent: a message with a few pictures keeps them all. */
+const MAX_MESSAGE_IMAGES = 4;
 
 type UserPart = { type: 'text'; text: string } | { type: 'image'; image: string; mediaType: string };
 type AssistantPart =
@@ -158,8 +161,20 @@ export function toModelMessages(branch: Entry[], options: ContextOptions): Model
   const keepCount = options.vision ? (options.keepImages ?? 1) : 0;
   const imagesOf = (tool: boolean) =>
     entries.flatMap(e => ((e.message.role === 'tool') === tool ? e.message.parts.filter(p => p.type === 'image') : []));
+  // All the pictures of the newest message that has some are kept together (the user asked about them as a set).
+  const newestUserImages =
+    entries
+      .filter(e => e.message.role !== 'tool' && e.message.parts.some(p => p.type === 'image'))
+      .at(-1)
+      ?.message.parts.filter(p => p.type === 'image') ?? [];
   const keep = new Set<MessagePart>(
-    keepCount ? [...imagesOf(false).slice(-keepCount), ...imagesOf(true).slice(-keepCount)] : [],
+    keepCount
+      ? [
+          ...imagesOf(false).slice(-keepCount),
+          ...newestUserImages.slice(-MAX_MESSAGE_IMAGES),
+          ...imagesOf(true).slice(-keepCount),
+        ]
+      : [],
   );
 
   const out: ModelMessage[] = [];

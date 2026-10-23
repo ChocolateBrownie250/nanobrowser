@@ -293,6 +293,13 @@ describe('the loop', () => {
     expect(await other.loop.run()).toMatchObject({ status: 'failed', outcome: 'partial', reason: ABNORMAL_REPLY });
   });
 
+  it('does not call a reply the provider ended with an error finish a success, with or without text', async () => {
+    const empty = await setup([{ finish: 'error' }]);
+    expect(await empty.loop.run()).toMatchObject({ status: 'failed', cause: 'provider' });
+    const partial = await setup([{ text: 'Let me', finish: 'error' }]);
+    expect(await partial.loop.run()).toMatchObject({ status: 'failed', outcome: 'partial', reason: ABNORMAL_REPLY });
+  });
+
   it('ends a run whose replies keep being cut by the output limit, through the error guard', async () => {
     const cut = (i: number) => ({
       toolCalls: [call('click', { target: { ref: 'a1' } }, `k${i}`)],

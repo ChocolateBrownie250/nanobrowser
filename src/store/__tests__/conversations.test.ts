@@ -224,4 +224,10 @@ describe('titleFrom', () => {
     expect(long).toHaveLength(60);
     expect(long.endsWith('…')).toBe(true);
   });
+
+  it('never cuts an emoji in half', () => {
+    const title = titleFrom(`${'a'.repeat(58)}😀 and more words after it`);
+    expect(title).toBe(`${'a'.repeat(58)}…`);
+    expect(/[\ud800-\udbff](?![\udc00-\udfff])/.test(title)).toBe(false);
+  });
 });

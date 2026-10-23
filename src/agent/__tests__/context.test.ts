@@ -368,6 +368,22 @@ describe('images', () => {
     expect(sent).toContain(JSON.stringify(IMAGE_DROPPED_LINE).slice(1, -1));
   });
 
+  it('keeps every picture of the newest message that has pictures, and says so for older ones', () => {
+    const user = (...names: string[]): Entry =>
+      entry({
+        type: 'message',
+        message: {
+          role: 'user',
+          parts: [{ type: 'text', text: 'Which is larger?' }, ...names.map(n => png(n, `${n} line`))],
+        },
+      });
+    const sent = JSON.stringify(toModelMessages([user('OLDA'), user('PICA', 'PICB')], { vision: true }));
+    expect(sent).toContain('PICA');
+    expect(sent).toContain('PICB');
+    expect(sent).not.toContain('OLDA');
+    expect(sent).toContain(JSON.stringify(IMAGE_DROPPED_LINE).slice(1, -1));
+  });
+
   it('sends no image to a model without vision', () => {
     const sent = JSON.stringify(toModelMessages(branch(), { vision: false }));
     expect(sent).not.toContain('USERPHOTO');
