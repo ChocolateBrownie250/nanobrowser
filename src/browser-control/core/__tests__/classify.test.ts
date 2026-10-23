@@ -389,6 +389,10 @@ describe('a generic Chinese confirmation matches as a prefix, except known harml
     }
     expect(activate('继续购物', { money: '¥99' })).toBeNull();
     expect(activate('确认收货', { money: '¥99' })).toBe('submit');
+    // The same words with the price written in the label are a paywall step, not a harmless continuation.
+    for (const name of ['继续观看 ¥6', '继续学习 ¥99', '继续阅读全文 ¥1', '繼續閱讀 $2', '确认购物 99元']) {
+      expect(activate(name, { money: '¥6' }), name).toBe('pay');
+    }
     // A confirmation that names what it does after the generic word is the money step, with an amount next to it.
     for (const name of ['确认提现', '確認提領', '确认转出', '確定轉出', '确认交易', '确认兑换', '確定匯出']) {
       expect(activate(name, { money: '¥99' }), name).toBe('pay');
@@ -453,6 +457,13 @@ describe('what choosing a select option is gated for', () => {
       '确认付款 ¥99',
       '提交订单 (¥99)',
       '去结算（3件）',
+      'Checkout – $49.99 USD',
+      'Pay now Rs. 499',
+      'Pay now NT$499',
+      'Pay now HK$99',
+      'Pay US$9 now',
+      'Pay $49 now',
+      'Pay now 9️⃣',
     ]) {
       expect(cls(label), label).toBe('pay');
     }

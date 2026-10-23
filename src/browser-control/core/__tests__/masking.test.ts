@@ -170,6 +170,11 @@ describe('secret fields named in Chinese, and card and PIN codes', () => {
     expect(field('pin', 'Parcel locker PIN (pickup address)')).toBe(true);
     expect(field('pin', 'Locker PIN for your district hub')).toBe(true);
     expect(field('pin', 'Electricity board PIN')).toBe(true);
+    // A PIN that is sent to the user is a one-time secret, whatever address it mentions.
+    expect(field('pin_code', 'Enter the PIN code we mailed to your address')).toBe(true);
+    expect(field('pin_code', 'PIN code sent to your registered address')).toBe(true);
+    expect(field('pin_code', 'PIN code from the letter to your address')).toBe(true);
+    expect(field('pin_code', 'PIN code received by SMS (city)')).toBe(true);
     expect(field('address-pin', 'PIN')).toBe(true);
     expect(field('pin', 'PIN', { placeholder: 'City / area' })).toBe(true);
     expect(field('pin', 'Area PIN')).toBe(true);

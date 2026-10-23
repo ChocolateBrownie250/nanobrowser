@@ -234,15 +234,19 @@ function onConsentPage(url: string | undefined): boolean {
 
 /**
  * A generic confirmation label: pay when a money amount is next to it. The English words match at a word boundary. The
- * Chinese ones match as a prefix ("确认提现", "確定轉出" move money and name what they do after the generic word), except
- * when what follows is a known harmless continuation: 继续购物 ("continue shopping") or 确认收货 ("confirm receipt") says
- * what it does and is not a payment because a price sits nearby.
+ * Chinese ones match as a prefix ("确认提现", "確定轉出" move money and name what they do after the generic word).
  */
 export const GENERIC_CONFIRM = new RegExp(
-  '^(?:(?:confirm|ok|okay|continue|next|proceed|agree|submit|yes)(?:\\b|$)|' +
-    '(?:确认|確認|确定|確定|继续|繼續|下一步)(?!购物|購物|收货|收貨|浏览|瀏覽|阅读|閱讀|观看|觀看|学习|學習|添加|编辑|編輯))',
+  '^(?:(?:confirm|ok|okay|continue|next|proceed|agree|submit|yes)(?:\\b|$)|(?:确认|確認|确定|確定|继续|繼續|下一步))',
   'i',
 );
+/**
+ * A Chinese generic word followed by a harmless continuation: 继续购物 ("continue shopping") or 确认收货 ("confirm
+ * receipt") says what it does and is not a payment because a price sits nearby. Not harmless when the label itself
+ * carries a price ("继续观看 ¥6", "继续阅读全文 ¥1"): that is a paywall step.
+ */
+const BENIGN_CONTINUATION =
+  /^(?:确认|確認|确定|確定|继续|繼續|下一步)(?:购物|購物|收货|收貨|浏览|瀏覽|阅读|閱讀|观看|觀看|学习|學習|添加|编辑|編輯)/;
 const DELETE_CLASSES = /(^|[\s_-])(delete|remove|destroy|trash|discard)([\s_-]|$)/i;
 
 export interface ClassifyInput {
@@ -268,7 +272,11 @@ function byName(name: string, money: string, url?: string): Classification | nul
   if (AFFIRMATIVE.test(name.trim()) && onConsentPage(url)) {
     return { category: 'grant', reason: `${quote(name)} on a consent page` };
   }
-  if (GENERIC_CONFIRM.test(name.trim()) && money) {
+  if (
+    GENERIC_CONFIRM.test(name.trim()) &&
+    money &&
+    !(BENIGN_CONTINUATION.test(name.trim()) && !AMOUNT_IN_LABEL.test(name))
+  ) {
     return { category: 'pay', reason: `${quote(name)} next to the amount ${quote(money, 40)}` };
   }
   if (DELETE_WORDS.test(name))
@@ -309,11 +317,23 @@ const PAY_COMMAND = new RegExp(
   'iu',
 );
 
-/** A label without the amounts and counts written next to it: "(2 items)", "$49", "¥99", "49.99 USD", "99元". */
+/**
+ * A money amount written in a label: a currency sign (with the letters that go before it, "NT$499", "HK$99") or "Rs."
+ * before a number, or a number with a currency code or word after it.
+ */
+const MONEY =
+  '(?<![a-z])Rs\\.?\\s?\\d[\\d.,]*|(?:(?<![a-z])[a-z]{1,3}(?=[$€£¥￥₹₩]))?[$€£¥￥₹₩]\\s?\\d[\\d.,]*(?:\\s?(?:usd|eur|gbp|jpy|cny|rmb|inr|元|円))?|\\d[\\d.,]*\\s?(?:usd|eur|gbp|jpy|cny|rmb|inr|元|円)';
+/** An amount in the label itself, for the generic-confirm rule. */
+const AMOUNT_IN_LABEL = new RegExp(MONEY, 'iu');
+/** Everything that reads as an amount or a count: money, bare numbers and the keycap digits some pages use ("9️⃣"). */
+const AMOUNT = new RegExp(`${MONEY}|\\d\\uFE0F?\\u20E3|\\d[\\d.,]*`, 'giu');
+
+/** A label without the amounts and counts written next to it: "(2 items)", "$49", "NT$499", "49.99 USD", "99元". */
 function withoutAmounts(label: string): string {
   return label
     .replace(/[(（][^)）]*[)）]/gu, ' ')
-    .replace(/[$€£¥￥₹₩]\s?\d[\d.,]*|\d[\d.,]*\s?(?:usd|eur|gbp|jpy|cny|rmb|inr|元|円)?/giu, ' ')
+    .replace(AMOUNT, ' ')
+    .replace(/\s+/g, ' ')
     .trim();
 }
 

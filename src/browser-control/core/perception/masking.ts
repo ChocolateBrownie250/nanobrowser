@@ -20,6 +20,8 @@ const PIN_CAMEL = /[a-z](?:PIN|Pin)(?![a-z])/;
 // A PIN that is a secret says so: a bank, card or ATM PIN, a security or verification PIN, one for logging in.
 const PIN_SECRET_CONTEXT =
   /secret|secur|card|atm|debit|credit|bank|verif|login|log.?in|sign.?in|account|password|passcode|otp|auth|transaction|wallet|upi/i;
+// A PIN that is sent to the user (mailed, texted, e-mailed) is a one-time secret, whatever address it mentions.
+const PIN_SENT_CONTEXT = /(?<![a-z])(?:mailed|sent|letter|sms|texted|e-?mail(?:ed)?|received)(?![a-z])/i;
 // A postal PIN code (India's postal index number) is called a "PIN code" and sits in an address form: the names say
 // "PIN code" together with an address word, or they say postal or zip. Address words are whole words ("city" inside
 // "electricity" is not one), and a PIN that only mentions an address ("the PIN we mailed to your address") is a secret.
@@ -44,7 +46,7 @@ function sensitiveNames(texts: Array<string | undefined>, autocomplete: string |
   if (texts.some(sensitiveName)) return true;
   const names = texts.filter((t): t is string => !!t);
   if (!names.some(t => PIN_WORD.test(t) || PIN_CAMEL.test(t))) return false;
-  if (names.some(t => PIN_SECRET_CONTEXT.test(t))) return true;
+  if (names.some(t => PIN_SECRET_CONTEXT.test(t) || PIN_SENT_CONTEXT.test(t))) return true;
   const postal =
     POSTAL_AUTOCOMPLETE.test(autocomplete ?? '') ||
     names.some(t => POSTAL_WORD.test(t)) ||
