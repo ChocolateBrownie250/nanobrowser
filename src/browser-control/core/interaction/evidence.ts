@@ -20,6 +20,14 @@ const NAVIGATION_READY_MS = 5_000;
 const VOLATILITY_MS = 400;
 /** Weak signals: mutations alone do not say the action did something. */
 const WEAK = / mutations? in /;
+/** At most this many alerts, validation messages or layers are listed as signals; the rest is counted. */
+const MAX_SOURCE_SIGNALS = 5;
+
+/** Signals for the new items of one source, capped: `… N more <noun>` stands for the rest. */
+export function cappedSignals(items: string[], signal: (item: string) => string, noun: string): string[] {
+  const shown = items.slice(0, MAX_SOURCE_SIGNALS).map(signal);
+  return items.length > MAX_SOURCE_SIGNALS ? [...shown, `… ${items.length - MAX_SOURCE_SIGNALS} more ${noun}`] : shown;
+}
 
 interface Snapshot {
   url: string;
@@ -297,12 +305,31 @@ export class Evidence {
       if (this.#navigation?.kind !== 'new-document' && !this.#dialog) {
         const [facts, focus] = await Promise.all([this.#pageFacts(), this.#focus()]);
         if (facts && this.#factsBefore) {
-          for (const a of facts.alerts) if (!this.#factsBefore.alerts.includes(a)) strong.push(`alert ${quote(a)}`);
-          for (const v of facts.invalid)
-            if (!this.#factsBefore.invalid.includes(v)) strong.push(`validation ${quote(v)}`);
-          const layers = facts.layers.filter(l => !this.#factsBefore!.layers.includes(l));
-          if (layers.length)
-            strong.push(`+${layers.length} top-level layer: ${layers.map(l => quote(l, 80)).join(', ')}`);
+          // Each source is capped: a page can add hundreds of alerts or invalid fields, and the receipt goes to the model.
+          const before = this.#factsBefore;
+          strong.push(
+            ...cappedSignals(
+              facts.alerts.filter(a => !before.alerts.includes(a)),
+              a => `alert ${quote(a)}`,
+              'alerts',
+            ),
+            ...cappedSignals(
+              facts.invalid.filter(v => !before.invalid.includes(v)),
+              v => `validation ${quote(v)}`,
+              'validation messages',
+            ),
+          );
+          const layers = facts.layers.filter(l => !before.layers.includes(l));
+          if (layers.length) {
+            strong.push(
+              `+${layers.length} top-level layer: ${layers
+                .slice(0, MAX_SOURCE_SIGNALS)
+                .map(l => quote(l, 80))
+                .join(
+                  ', ',
+                )}${layers.length > MAX_SOURCE_SIGNALS ? `, … ${layers.length - MAX_SOURCE_SIGNALS} more` : ''}`,
+            );
+          }
         }
         if (focus && focus !== this.#focusBefore && focus !== 'the target') strong.push(`focus → ${quote(focus, 80)}`);
       }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { FormFacts } from '../../probe';
-import { classify, enterSubmits } from '../interaction/classify';
+import { AFFIRMATIVE, classify, enterSubmits } from '../interaction/classify';
+import { keyMode } from '../interaction/keys';
 
 const plain: FormFacts = {
   tag: 'button',
@@ -116,6 +117,88 @@ describe('sensitivity classifier', () => {
   });
 });
 
+describe('Chinese vocabulary, Simplified and Traditional', () => {
+  const consent = 'https://id.example/oauth/consent';
+  const onConsent = (name: string) =>
+    classify({ mode: 'activate', name, role: 'button', facts: plain, url: consent }).category;
+
+  it('classifies the Traditional forms like the Simplified ones', () => {
+    for (const name of ['購買', '立即購買', '下單', '結帳', '結算', '儲值', '訂閱', '轉帳', '捐款', '付款', '支付']) {
+      expect(activate(name), name).toBe('pay');
+    }
+    for (const name of ['刪除', '刪除帳號', '移除', '清空', '註銷', '取消訂閱']) {
+      expect(activate(name), name).toBe('delete');
+    }
+    for (const name of [
+      '提交',
+      '發送',
+      '發布',
+      '確認',
+      '保存',
+      '儲存',
+      '更新',
+      '創建',
+      '建立',
+      '批准',
+      '拒絕',
+      '駁回',
+    ]) {
+      expect(activate(name), name).toBe('submit');
+    }
+    // The Simplified forms still work.
+    expect(activate('购买')).toBe('pay');
+    expect(activate('删除')).toBe('delete');
+    expect(activate('发送')).toBe('submit');
+    expect(activate('订阅')).toBe('pay');
+    expect(activate('取消订阅')).toBe('delete');
+    expect(activate('展開')).toBeNull();
+    expect(activate('取消')).toBeNull();
+  });
+
+  it('grants: Traditional access vocabulary', () => {
+    for (const name of ['授權', '授权', '允許訪問', '允许访问', '授予訪問']) {
+      expect(activate(name), name).toBe('grant');
+    }
+  });
+
+  it('a Traditional cookie refusal is not a write, either', () => {
+    expect(activate('拒絕所有')).toBeNull();
+    expect(activate('全部拒絕')).toBeNull();
+    expect(activate('拒絕 Cookie')).toBeNull();
+    expect(activate('拒絕所有', { submitter: true, form: form() })).toBe('submit');
+  });
+
+  it('a generic Chinese confirmation next to an amount is pay (\\b never holds after a Chinese character)', () => {
+    for (const name of ['确认', '確認', '确定', '確定', '继续', '繼續', '下一步']) {
+      expect(activate(`${name} ¥99`, { money: '¥99' }), name).toBe('pay');
+      expect(activate(`${name}¥99`, { money: '¥99' }), name).toBe('pay');
+      expect(activate(name, { money: '¥99' }), name).toBe('pay');
+    }
+    // Without an amount a confirmation is a plain submission (or nothing).
+    expect(activate('确认 ¥99')).toBe('submit');
+    expect(activate('確認')).toBe('submit');
+    expect(activate('确定')).toBeNull();
+    // English keeps its word boundary: "Confirmation" and "Okapi" are not generic labels.
+    expect(activate('Confirm $49', { money: '$49' })).toBe('pay');
+    expect(activate('Okapi', { money: '$49' })).toBeNull();
+    expect(activate('Nextdoor', { money: '$49' })).toBeNull();
+  });
+
+  it('an affirmative Chinese label followed by more characters grants access on a consent page', () => {
+    for (const name of ['允许全部', '允許全部', '允许', '允許', '同意并继续', '接受', '批准']) {
+      expect(AFFIRMATIVE.test(name), name).toBe(true);
+    }
+    expect(onConsent('允许全部')).toBe('grant');
+    expect(onConsent('允許全部')).toBe('grant');
+    expect(onConsent('同意並繼續')).toBe('grant');
+    expect(onConsent('Allow all')).toBe('grant');
+    // Off a consent page it stays a cookie banner's label, not a grant.
+    expect(activate('允许全部')).toBeNull();
+    expect(AFFIRMATIVE.test('Allowance')).toBe(false);
+    expect(AFFIRMATIVE.test('Yesterday')).toBe(false);
+  });
+});
+
 describe('enrichments', () => {
   const field: FormFacts = { ...plain, tag: 'textarea', type: 'textarea', textEntry: true };
 
@@ -152,6 +235,21 @@ describe('enrichments', () => {
       classify({ mode: 'enter', name: 'Search', role: 'searchbox', facts: { ...field, searchField: true } }).category,
     ).toBe(null);
     expect(classify({ mode: 'enter', name: 'Price', role: 'slider', facts: plain }).category).toBe(null);
+  });
+
+  it('item 6: Enter in a contenteditable chat box with a neutral name is a send (mode comes from keyMode)', () => {
+    const chatFacts: FormFacts = { ...plain, tag: 'div', type: '', textEntry: true };
+    for (const host of [
+      { tag: 'div', type: '', contentEditable: true, role: 'textbox' },
+      { tag: 'div', type: '', contentEditable: false, role: 'textbox' },
+      { tag: 'div', type: '', contentEditable: true, role: '' },
+    ]) {
+      const mode = keyMode('Enter', host);
+      expect(mode).toBe('enter');
+      expect(classify({ mode: mode as 'enter', name: 'Message', role: 'textbox', facts: chatFacts }).category).toBe(
+        'submit',
+      );
+    }
   });
 
   it('item 7: "save" and "update" are submission vocabulary', () => {

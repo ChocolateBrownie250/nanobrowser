@@ -7,7 +7,7 @@ import type { ScrollInfo } from '../../probe';
 import type { ToolContext, ToolOutcome } from '../controller';
 import { resolveTarget } from '../interaction/resolve';
 import type { ResolvedTarget } from '../interaction/resolve';
-import { waitForActionable } from '../interaction/actionability';
+import { VIA_LABEL_NOTE, waitForActionable } from '../interaction/actionability';
 import { dispatchClick, dispatchHover, dispatchWheel } from '../interaction/pointer';
 import { withEvidence } from '../interaction/evidence';
 import { preflightNavigation } from '../interaction/preflight';
@@ -123,7 +123,8 @@ export async function click(ctx: ToolContext, args: ClickArgs): Promise<ToolOutc
       );
       const receipt: ActionReceipt = {
         action: 'click',
-        target: `[${target.record.ref}] ${target.description}`,
+        // Invariant 4: a different node chosen by rule before dispatch is named in the receipt.
+        target: `[${target.record.ref}] ${target.description}${actionable.viaLabel ? ` (${VIA_LABEL_NOTE})` : ''}`,
         mechanism: 'pointer',
         dispatched: outcome.dispatched,
         reachedTarget: outcome.reachedTarget,

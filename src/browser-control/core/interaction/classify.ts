@@ -3,12 +3,20 @@
 // payment gate (vocabulary, and a money amount next to a generic confirmation label), written independently, and is
 // deliberately kept at that scope for the first version: vocabulary, money next to a generic label, form ownership
 // and HTML implicit submission, with no wider heuristics (the user's direction, 2026-10-04).
+// The vocabulary covers exactly three languages: English, Simplified Chinese and Traditional Chinese (the product's UI
+// languages). A label in any other language (Japanese, Korean, Spanish, French, German, Russian...) is not recognised by
+// name; such a control is judged by the structural rules only: a submit button owned by a form, Enter in a form, a
+// destructive class or test ID, and Enter in a text field with no form.
 // The vocabulary errs toward inclusion: a false positive costs one prompt, a false negative an irreversible action.
 import type { SensitiveCategory } from '../../protocol/results';
 import type { FormFacts } from '../../probe';
 import { quote } from '../text';
 
-/** Builds a case-insensitive matcher: English phrases match on word boundaries, Chinese phrases anywhere. */
+/**
+ * Builds a case-insensitive matcher: English phrases match on word boundaries, Chinese phrases (Simplified and
+ * Traditional) anywhere. `\b` is ASCII-only in JavaScript and never holds between two Chinese characters, so the
+ * Chinese alternatives carry no boundary.
+ */
 function vocabulary(english: string[], chinese: string[]): RegExp {
   const words = english.map(w => w.trim().split(/\s+/).join('\\s*'));
   return new RegExp(`\\b(?:${words.join('|')})\\b|${chinese.join('|')}`, 'i');
@@ -37,7 +45,28 @@ export const PAY_WORDS = vocabulary(
     'transfer money',
     'top up',
   ],
-  ['付款', '支付', '购买', '下单', '结账', '结算', '充值', '订阅', '转账', '捐款'],
+  [
+    // Simplified
+    '付款',
+    '支付',
+    '购买',
+    '下单',
+    '结账',
+    '结算',
+    '充值',
+    // Not 取消订阅 (cancel a subscription), which is a deletion.
+    '(?<!取消)订阅',
+    '转账',
+    '捐款',
+    // Traditional (the characters that differ)
+    '購買',
+    '下單',
+    '結帳',
+    '結算',
+    '儲值',
+    '(?<!取消)訂閱',
+    '轉帳',
+  ],
 );
 export const DELETE_WORDS = vocabulary(
   [
@@ -57,7 +86,7 @@ export const DELETE_WORDS = vocabulary(
     'cancel order',
     'close account',
   ],
-  ['删除', '移除', '清空', '注销', '取消订阅'],
+  ['删除', '移除', '清空', '注销', '取消订阅', '刪除', '註銷', '取消訂閱'],
 );
 export const SUBMIT_WORDS = vocabulary(
   [
@@ -75,17 +104,39 @@ export const SUBMIT_WORDS = vocabulary(
     'approve',
     'reject',
   ],
-  ['提交', '发送', '发布', '确认', '保存', '更新', '创建', '批准', '拒绝', '驳回'],
+  [
+    // Simplified
+    '提交',
+    '发送',
+    '发布',
+    '确认',
+    '保存',
+    '更新',
+    '创建',
+    '批准',
+    '拒绝',
+    '驳回',
+    // Traditional (the characters that differ)
+    '發送',
+    '發布',
+    '確認',
+    '儲存',
+    '創建',
+    '建立',
+    '拒絕',
+    '駁回',
+  ],
 );
 /** A cookie banner's refusal ("Reject all", "Reject cookies"), which is not a write although "reject" is. */
-export const COOKIE_REJECT = /cookie|^reject\s+all$|^(?:拒绝所有|全部拒绝|拒绝全部)$/i;
+export const COOKIE_REJECT = /cookie|^reject\s+all$|^(?:拒绝所有|全部拒绝|拒绝全部|拒絕所有|全部拒絕|拒絕全部)$/i;
 /** Granting access: protected, like a payment. */
 export const GRANT_WORDS = vocabulary(
   ['authorize', 'authorise', 'allow access', 'grant access', 'give access'],
-  ['授权', '允许访问', '授予访问'],
+  ['授权', '允许访问', '授予访问', '授權', '允許訪問', '授予訪問'],
 );
 /** An affirmative label, which grants access on a consent page; "Allow" alone elsewhere is a cookie banner's. */
-export const AFFIRMATIVE = /^(?:allow|continue|accept|approve|agree|yes|允许|继续|接受|同意|批准)(?:\b|$)/i;
+export const AFFIRMATIVE =
+  /^(?:(?:allow|continue|accept|approve|agree|yes)(?:\b|$)|允许|允許|继续|繼續|接受|同意|批准)/i;
 /** The address path of a consent page. */
 const CONSENT_PATH = /oauth|authori[sz]e|consent/i;
 
@@ -99,7 +150,7 @@ function onConsentPage(url: string | undefined): boolean {
 }
 /** A generic confirmation label: pay when a money amount is next to it. */
 export const GENERIC_CONFIRM =
-  /^(?:confirm|ok|okay|continue|next|proceed|agree|submit|yes|确认|确定|继续|下一步)(?:\b|$)/i;
+  /^(?:(?:confirm|ok|okay|continue|next|proceed|agree|submit|yes)(?:\b|$)|确认|確認|确定|確定|继续|繼續|下一步)/i;
 const DELETE_CLASSES = /(^|[\s_-])(delete|remove|destroy|trash|discard)([\s_-]|$)/i;
 
 export interface ClassifyInput {
@@ -131,6 +182,24 @@ function byName(name: string, money: string, url?: string): Classification | nul
   if (DELETE_WORDS.test(name))
     return { category: 'delete', reason: `the name ${quote(name)} is destructive vocabulary` };
   return null;
+}
+
+/** A delete shortcut (Delete, Backspace or `#`) sent to something that is not a text field: best effort, see keys.ts. */
+export function classifyShortcut(): Classification {
+  return {
+    category: 'delete',
+    reason: 'Delete, Backspace or # outside a text field is a delete shortcut on many pages',
+  };
+}
+
+/**
+ * What choosing a menu option does, judged by its label alone: payment, access and destructive vocabulary (a "Delete"
+ * or "Cancel order" option of an actions menu). Submission vocabulary is left out on purpose: "Update" or "Save" among
+ * a select's options is more often a sort order or a setting than a submission. Null when the label says nothing.
+ */
+export function classifyOption(label: string, url?: string): Classification | null {
+  const named = byName(label.trim(), '', url);
+  return named ? { ...named, reason: `the option ${named.reason.replace(/^the name /, '')}` } : null;
 }
 
 /**

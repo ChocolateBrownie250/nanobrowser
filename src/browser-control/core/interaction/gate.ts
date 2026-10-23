@@ -4,9 +4,10 @@
 import { LayerError } from '../../protocol/errors';
 import type { SensitiveCategory, UserStepDetails } from '../../protocol/results';
 import type { FormFacts, ProbeState } from '../../probe';
+import { checkCancelled } from '../controller';
 import type { ToolContext } from '../controller';
 import type { ConfirmAnswer, ConfirmRequest, FrameRecord } from '../ports';
-import { classify } from './classify';
+import { classify, classifyShortcut } from './classify';
 import type { Classification } from './classify';
 import { resolveRecord } from './resolve';
 import type { ResolvedTarget } from './resolve';
@@ -19,8 +20,11 @@ export type ConfirmPolicy = 'sensitive' | 'always' | 'never';
 
 export interface GateInput {
   action: string;
-  /** activate: a click or Enter/Space on a button or link; enter: Enter in a field; none: no classification. */
-  mode: 'activate' | 'enter' | 'none';
+  /**
+   * activate: a click or Enter/Space on a button or link; enter: Enter in a field; delete: a delete shortcut key on
+   * something that is not a text field; none: no classification.
+   */
+  mode: 'activate' | 'enter' | 'delete' | 'none';
   frame: FrameRecord;
   objectId: string;
   name: string;
@@ -33,6 +37,8 @@ export interface GateInput {
   textInput?: boolean;
   /** A category fixed by the tool rather than classified: `upload` is always a write. */
   category?: SensitiveCategory;
+  /** Why the fixed category applies, for the card and the audit (default: the upload's). */
+  reason?: string;
 }
 
 export interface GateResult {
@@ -77,7 +83,7 @@ async function defaultButtonName(ctx: ToolContext, frame: FrameRecord, objectId:
 export async function classifyOn(
   ctx: ToolContext,
   input: {
-    mode: 'activate' | 'enter';
+    mode: 'activate' | 'enter' | 'delete';
     frame: FrameRecord;
     objectId: string;
     name: string;
@@ -85,6 +91,11 @@ export async function classifyOn(
     role: string;
   },
 ): Promise<Judgement> {
+  // A delete shortcut is judged by the key alone: no facts of the element are needed (nothing may have focus).
+  if (input.mode === 'delete') {
+    const shortcut = classifyShortcut();
+    return { ...shortcut, basis: `${shortcut.category}: ${shortcut.reason}` };
+  }
   const facts = await ctx.tab().probe!.call<FormFacts>(input.frame, input.objectId, 'formFacts');
   if (input.mode === 'enter' && facts.form?.defaultButton) {
     // The probe only approximates names; the default button is judged by Chrome's accessible name too.
@@ -119,7 +130,7 @@ export function basisOf(result: Classification, mode: 'activate' | 'enter', fact
 export async function assertJudged(
   ctx: ToolContext,
   input: {
-    mode: 'activate' | 'enter';
+    mode: 'activate' | 'enter' | 'delete';
     frame: FrameRecord;
     objectId: string;
     name: string;
@@ -168,7 +179,7 @@ export async function confirmGate(ctx: ToolContext, input: GateInput): Promise<G
   let basis: string | undefined;
   if (input.category) {
     category = input.category;
-    reason = 'an upload sends a file to the site';
+    reason = input.reason ?? 'an upload sends a file to the site';
   } else if (input.mode !== 'none') {
     const result = await classifyOn(ctx, { ...input, mode: input.mode });
     category = result.category ?? undefined;
@@ -236,7 +247,7 @@ export async function confirmGate(ctx: ToolContext, input: GateInput): Promise<G
   // The card names the frame's host and the destination's host when they differ from the site (section 8).
   const frameHost = input.frame.url ? siteOf(input.frame.url) : '';
   const destination =
-    input.mode !== 'none'
+    input.mode === 'activate' || input.mode === 'enter'
       ? await ctx
           .tab()
           .probe!.call<{ url: string } | null>(input.frame, input.objectId, 'navigationTarget', input.mode)
@@ -262,6 +273,9 @@ export async function confirmGate(ctx: ToolContext, input: GateInput): Promise<G
     MASK,
   );
   const tab = ctx.tab();
+  // A signal that is already aborted never fires its event, so a card would open for a call that was cancelled while
+  // the target was being classified: checked here, immediately before the card exists.
+  checkCancelled(ctx);
   const modal = { kind: 'confirmation' as const, detail: `${request.category}: ${request.action} ${request.target}` };
   tab.pending.push(modal);
   const controller = new AbortController();

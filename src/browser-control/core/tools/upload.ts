@@ -18,6 +18,12 @@ import { quote } from '../text';
 import { sensitivity } from './act';
 import { withPageState } from './navigate';
 
+let uploadCalls = 0;
+/** A key for one upload call's chunks in the page: unique in this worker, and not guessable from the action count. */
+function nextUploadId(): string {
+  return `${++uploadCalls}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 /** Base64 goes to the page in pieces: one CDP message per piece keeps a 25 MB file within message limits. */
 const CHUNK = 4 * 1024 * 1024;
 
@@ -143,23 +149,39 @@ export async function upload(ctx: ToolContext, args: UploadArgs): Promise<ToolOu
           objectId: input.objectId,
         });
       } else {
+        // Chunks are held in the page by key: a key of its own for this call, so that a failed attempt can never mix its
+        // chunks into a corrected retry.
+        const callId = nextUploadId();
         const specs = args.attachments!.map((a, i) => ({
-          key: `f${tab.actionSeq}-${i}`,
+          key: `u${callId}-${i}`,
           name: a.name,
           mimeType: a.mimeType,
         }));
-        for (const [i, a] of args.attachments!.entries()) {
-          for (let at = 0; at < a.base64.length || at === 0; at += CHUNK) {
-            await probe.call<number>(
+        try {
+          for (const [i, a] of args.attachments!.entries()) {
+            for (let at = 0; at < a.base64.length || at === 0; at += CHUNK) {
+              await probe.call<number>(
+                input.frame,
+                input.objectId,
+                'fileChunk',
+                specs[i].key,
+                a.base64.slice(at, at + CHUNK),
+              );
+            }
+          }
+          await probe.call<FileInfo[]>(input.frame, input.objectId, 'setFiles', specs);
+        } catch (error) {
+          // Whatever failed, the bytes already sent are not left behind in the page.
+          await probe
+            .call<number>(
               input.frame,
               input.objectId,
-              'fileChunk',
-              specs[i].key,
-              a.base64.slice(at, at + CHUNK),
-            );
-          }
+              'dropFiles',
+              specs.map(s => s.key),
+            )
+            .catch(() => undefined);
+          throw error;
         }
-        await probe.call<FileInfo[]>(input.frame, input.objectId, 'setFiles', specs);
       }
       tab.actionSeq++;
       return {};

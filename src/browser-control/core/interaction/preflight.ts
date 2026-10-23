@@ -14,7 +14,16 @@ export async function preflightNavigation(
   description: string,
 ): Promise<NavigationTarget | null> {
   const probe = ctx.tab().probe!;
-  const nav = await probe.call<NavigationTarget | null>(frame, objectId, 'navigationTarget', mode).catch(() => null);
+  // Fails closed: a destination that cannot be read (the probe threw, the world is gone) is refused, not taken for
+  // "nowhere". A typed layer error (detached, cancelled) keeps its own code.
+  const nav = await probe.call<NavigationTarget | null>(frame, objectId, 'navigationTarget', mode).catch(error => {
+    if (error instanceof LayerError) throw error;
+    throw new LayerError(
+      'URL_NOT_ALLOWED',
+      `Where ${description} would navigate could not be read, so the policy cannot be checked. Nothing was dispatched.`,
+      { delivered: false },
+    );
+  });
   if (!nav) return null;
   // The policy applies to main-frame documents: a link inside a frame that targets its own frame does not.
   if (frame.parentFrameId && !nav.newTab) return nav;

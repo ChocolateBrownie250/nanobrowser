@@ -38,9 +38,10 @@ function walk(nodes: ONode[], visit: (n: ONode, ancestors: ONode[]) => void, anc
  * A record as the observation that matched it showed it: revalidation compares with that print, not with the
  * registry's, which a later capture may have replaced.
  */
-function asShown(ctx: ToolContext, observation: Observation, ref: string): RefRecord {
+function asShown(ctx: ToolContext, observation: Observation, ref: string, fresh = false): RefRecord {
   const record = ctx.controller.registry.get(ref)!;
-  const shown = observation.shown.get(ref);
+  // What the session was shown for the ref wins: the observation may be a later one, with a print the agent never saw.
+  const shown = (fresh ? undefined : ctx.session.known.shown(record.tabId, ref)) ?? observation.shown.get(ref);
   return shown ? { ...record, ...shown } : record;
 }
 
@@ -67,23 +68,41 @@ async function resolveSemantic(
   }
   const role = target.role.toLowerCase();
   const name = target.name === undefined ? undefined : cleanText(target.name);
+  // An element the session was never shown is not a candidate for an action (refs fail closed: a ref is valid only if the
+  // agent was shown it). `fresh` is for `wait`, which only reads a state and looks for what the page has just added.
   const matches: ONode[] = [];
+  let unseen = 0;
   walk(roots, n => {
     if (!n.ref) return;
     if (n.role.toLowerCase() !== role && n.rawRole.toLowerCase() !== role) return;
     if (name !== undefined && n.name !== name) return;
+    if (!fresh && !ctx.session.known.has(tabId, n.ref)) {
+      unseen++;
+      return;
+    }
     matches.push(n);
   });
   const label = `${target.role}${name !== undefined ? ` ${quote(name)}` : ''}`;
-  if (!matches.length) throw new LayerError('NO_MATCH', `No element matches ${label}`);
+  // A gap in the capture can hide the element, so "not found" also says what was not captured.
+  const gaps = observation.captureNotices.length
+    ? ` Not everything was captured: ${observation.captureNotices.join(' ')}`
+    : '';
+  if (!matches.length) {
+    throw new LayerError(
+      'NO_MATCH',
+      unseen
+        ? `${unseen} element${unseen > 1 ? 's' : ''} in the page match${unseen > 1 ? '' : 'es'} ${label} but ${unseen > 1 ? 'were' : 'was'} not shown to you. Scroll, or call snapshot or find to see ${unseen > 1 ? 'them' : 'it'}, then use the ref.${gaps}`
+        : `No element matches ${label}.${gaps}`,
+    );
+  }
   if (target.nth !== undefined) {
     const pick = matches[target.nth];
     if (!pick)
       throw new LayerError(
         'NO_MATCH',
-        `Only ${matches.length} elements match ${label}; nth ${target.nth} does not exist`,
+        `Only ${matches.length} elements match ${label}; nth ${target.nth} does not exist.${gaps}`,
       );
-    return asShown(ctx, observation, pick.ref!);
+    return asShown(ctx, observation, pick.ref!, fresh);
   }
   if (matches.length > 1) {
     const list = matches.slice(0, 10).map(m => `[${m.ref}] ${m.role} ${quote(m.name, 60)}`);
@@ -92,7 +111,7 @@ async function resolveSemantic(
       `${matches.length} elements match ${label}: ${list.join(', ')}${matches.length > 10 ? ', …' : ''}`,
     );
   }
-  return asShown(ctx, observation, matches[0].ref!);
+  return asShown(ctx, observation, matches[0].ref!, fresh);
 }
 
 /** 'button "Delete" in row "…"', using the last observation for the enclosing row or list item. */

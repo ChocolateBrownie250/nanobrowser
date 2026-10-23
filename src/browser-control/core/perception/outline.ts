@@ -265,6 +265,7 @@ export function completeFieldFacts(frame: FrameCapture, doc: LayoutDocument | un
       autocomplete: el.attrs.autocomplete?.toLowerCase(),
       name: el.attrs.name,
       id: el.attrs.id,
+      placeholder: el.attrs.placeholder,
     };
   }
   return fields;

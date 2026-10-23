@@ -21,6 +21,8 @@ import { quote } from '../text';
 
 /** A capture is reused by read-only helpers only right after it, with no action in between. */
 const REUSE_MS = 2_000;
+/** A screenshot with `labels` numbers at most this many elements. */
+const MAX_LABELS = 300;
 
 /** The refs with the print this observation showed for each. */
 function shownOf(observation: Observation, refs: string[]): Array<[string, Shown]> {
@@ -185,8 +187,12 @@ export async function find(ctx: ToolContext, args: FindArgs): Promise<ToolOutcom
     ),
   );
   const data = shown.map(n => ({ ref: n.ref!, line: renderLine(n), tabId: tab.tabId }));
-  const notices =
-    matches.length > limit ? [`… ${matches.length - limit} more matches; raise limit or narrow the query.`] : [];
+  // find looks at the whole tree, so only a gap in the capture (a frame not captured, a tree cut at its depth) can hide a
+  // match: it is stated, so that "no match" is not read as "not on the page".
+  const notices = [
+    ...(matches.length > limit ? [`… ${matches.length - limit} more matches; raise limit or narrow the query.`] : []),
+    ...observation.captureNotices,
+  ];
   return {
     data,
     lines: [`find · tab ${tab.tabId} · ${matches.length} match${matches.length === 1 ? '' : 'es'}`],
@@ -211,7 +217,10 @@ export async function read(
   const content = renderContent(roots, args.format ?? 'markdown');
   const offset = args.offset ?? 0;
   const { text, remaining } = sliceContent(content, offset, args.maxChars ?? 20_000);
-  const notices = remaining ? [`… ${remaining} more characters; continue with offset ${offset + text.length}.`] : [];
+  const notices = [
+    ...(remaining ? [`… ${remaining} more characters; continue with offset ${offset + text.length}.`] : []),
+    ...observation.captureNotices,
+  ];
   return {
     data: { content: text, offset, remaining },
     lines: [`read · tab ${tab.tabId} · ${quote(observation.title)} · ${text.length} characters`],
@@ -271,7 +280,7 @@ export async function screenshot(ctx: ToolContext, args: ScreenshotArgs): Promis
   if (args.labels) {
     // Only what the image shows is presented: a ref outside a cropped image keeps the baseline it had.
     const image = clip ?? { width: shot.width / scale, height: shot.height / scale };
-    const boxes = presentedBoxes(await boxesOf(ctx, observation.entries.slice(0, 300), frames, origin), image);
+    const boxes = presentedBoxes(await boxesOf(ctx, observation.entries.slice(0, MAX_LABELS), frames, origin), image);
     labelled = boxes.length;
     base64 = await drawLabels(base64, boxes, scale);
     ctx.session.known.add(
@@ -282,11 +291,21 @@ export async function screenshot(ctx: ToolContext, args: ScreenshotArgs): Promis
       ),
     );
   }
+  // Refs past the first 300 are not drawn, whether or not they are in the image: said, so a missing label is not read
+  // as a missing element.
+  const unlabelled = args.labels ? observation.entries.length - MAX_LABELS : 0;
   return {
     data: { mimeType: 'image/png', base64, width: shot.width, height: shot.height, scale, origin },
     lines: [
       `screenshot · tab ${tab.tabId} · ${shot.width}×${shot.height} px · scale ${scale.toFixed(2)}${args.labels ? ` · ${labelled} labels` : ''}`,
     ],
+    ...(unlabelled > 0
+      ? {
+          notices: [
+            `… ${unlabelled} actionable elements beyond the first ${MAX_LABELS} are not labelled; their refs are not shown on the image. Use snapshot or find for them.`,
+          ],
+        }
+      : {}),
   };
 }
 

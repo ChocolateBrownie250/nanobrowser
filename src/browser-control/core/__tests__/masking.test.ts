@@ -1,15 +1,18 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { RefRegistry } from '../refs';
-import type { Capture, FrameCapture } from '../perception/capture';
+import type { Capture, FieldFacts, FrameCapture } from '../perception/capture';
+import type { ProbeState } from '../../probe';
 import type { AXNode } from '../perception/ax';
 import { buildFrameTree, renderLines } from '../perception/outline';
 import { buildObservation } from '../perception/observe';
 import { redactArgs } from '../redact';
 import {
+  isSecretField,
   isSensitiveField,
   isSensitiveLabel,
   isSensitiveOption,
+  isSensitiveState,
   listedOption,
   quotedOption,
 } from '../perception/masking';
@@ -68,6 +71,94 @@ describe('code fields by name and label', () => {
   it('prints ordinary code fields', () => {
     for (const label of ['Promo code', 'Zip code', 'Postal code', 'Coupon code', 'Discount code', 'Country code']) {
       expect(field(label.toLowerCase().replace(' ', '_'), label)).toBe(false);
+    }
+  });
+});
+
+describe('secret fields named in Chinese, and card and PIN codes', () => {
+  const field = (name: string, label = '', facts: Partial<FieldFacts> = {}) =>
+    isSensitiveField({ tag: 'input', type: 'text', name, ...facts }, label, '123456');
+  const state = (over: Partial<ProbeState>): ProbeState =>
+    ({
+      tag: 'input',
+      type: 'text',
+      autocomplete: '',
+      name: '',
+      id: '',
+      placeholder: '',
+      value: '123456',
+      ...over,
+    }) as ProbeState;
+
+  it('masks a field whose label is a Simplified or Traditional Chinese secret term', () => {
+    for (const label of [
+      '验证码',
+      '驗證碼',
+      '短信验证码',
+      '校验码',
+      '校驗碼',
+      '动态码',
+      '動態碼',
+      '密码',
+      '密碼',
+      '登录密码',
+      '口令',
+      '卡号',
+      '卡號',
+      '信用卡號',
+      '银行卡',
+      '銀行卡',
+      '安全码',
+      '安全碼',
+    ]) {
+      expect(field('x', label), label).toBe(true);
+      // The same words as a name or id attribute.
+      expect(field(label), label).toBe(true);
+      expect(isSensitiveField({ tag: 'input', type: 'text', id: label }, '', '1234'), label).toBe(true);
+      expect(isSecretField(state({ name: 'x' }), label), label).toBe(true);
+    }
+  });
+
+  it('matches cv2, cvn and pin as words, not inside other words', () => {
+    for (const name of [
+      'cv2',
+      'CV2',
+      'cvn',
+      'pin',
+      'PIN',
+      'pin_code',
+      'pin-code',
+      'user_pin',
+      'card.pin',
+      'pin1',
+      'userPin',
+    ]) {
+      expect(field(name), name).toBe(true);
+    }
+    expect(field('x', 'Enter your PIN')).toBe(true);
+    expect(field('x', 'CVN')).toBe(true);
+    for (const name of ['spinner', 'shipping', 'pinterest', 'opinion', 'mapping', 'discover', 'cv']) {
+      expect(field(name), name).toBe(false);
+    }
+    expect(field('x', 'Pinterest board')).toBe(false);
+    expect(isSecretField(state({ id: 'pin' }), '')).toBe(true);
+    expect(isSecretField(state({ id: 'shipping' }), '')).toBe(false);
+  });
+
+  it('also reads the placeholder, so an unlabelled field is still masked', () => {
+    expect(field('f1', '', { placeholder: '请输入验证码' })).toBe(true);
+    expect(field('f1', '', { placeholder: '請輸入密碼' })).toBe(true);
+    expect(field('f1', '', { placeholder: 'Enter PIN' })).toBe(true);
+    expect(field('f1', '', { placeholder: 'Enter your name' })).toBe(false);
+    expect(isSecretField(state({ placeholder: '验证码' }), '')).toBe(true);
+    expect(isSecretField(state({ placeholder: 'Your name' }), '')).toBe(false);
+    expect(isSensitiveState(state({ placeholder: '驗證碼' }), '')).toBe(true);
+    expect(isSensitiveState(state({ placeholder: 'Search' }), '')).toBe(false);
+  });
+
+  it('still prints ordinary fields named in Chinese', () => {
+    for (const label of ['姓名', '郵遞區號', '邮编', '优惠码', '優惠碼', '手机号']) {
+      expect(field('x', label), label).toBe(false);
     }
   });
 });

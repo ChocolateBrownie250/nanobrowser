@@ -5,10 +5,19 @@ import { quote } from '../text';
 
 const SENSITIVE_TYPES = new Set(['password', 'hidden', 'file']);
 const SENSITIVE_AUTOCOMPLETE = /(^|\s)(cc-|one-time-code|current-password|new-password)/;
-// Names, ids and labels of fields that hold a secret. Code fields are matched by what kind of code they hold
-// (verification, authentication, two-factor), so a promo, zip or postal code is still printed.
+// Names, ids, labels and placeholders of fields that hold a secret. Code fields are matched by what kind of code they
+// hold (verification, authentication, two-factor), so a promo, zip or postal code is still printed. The terms are
+// English, Simplified Chinese and Traditional Chinese, as in the classifier (`interaction/classify.ts`). `cv2`, `cvn`
+// and `pin` are matched as separate words (so `pin_code` and `PIN` match, `spinner` and `shipping` do not).
 const SENSITIVE_NAME =
-  /(card.?num|cc.?num|credit.?card|cvv|cvc|csc|security.?code|one.?time|otp|totp|2fa|mfa|two.?factor|verif(?:y|ication).?code|auth(?:entication|enticator|orization)?.?code|passcode|password|passwd)/i;
+  /(card.?num|cc.?num|credit.?card|cvv|cvc|csc|security.?code|one.?time|otp|totp|2fa|mfa|two.?factor|verif(?:y|ication).?code|auth(?:entication|enticator|orization)?.?code|passcode|password|passwd|验证码|驗證碼|校验码|校驗碼|动态码|動態碼|密码|密碼|口令|卡号|卡號|银行卡|銀行卡|信用卡|安全码|安全碼)|(?<![a-z])(?:cv2|cvn|pin)(?![a-z])/i;
+// The same words written in camel case (`userPin`, `cardCV2`), which the case-insensitive pattern cannot tell from a
+// word inside another word.
+const SENSITIVE_CAMEL = /[a-z](?:PIN|Pin|CV2|Cv2|CVN|Cvn)(?![a-z])/;
+
+function sensitiveName(text: string | undefined): boolean {
+  return !!text && (SENSITIVE_NAME.test(text) || SENSITIVE_CAMEL.test(text));
+}
 
 /** Digits only, 13 to 19 long, passing the Luhn check. */
 export function looksLikeCardNumber(value: string): boolean {
@@ -30,7 +39,12 @@ export function looksLikeCardNumber(value: string): boolean {
 export function isSensitiveField(facts: FieldFacts | undefined, name: string, value: string): boolean {
   if (facts?.type && SENSITIVE_TYPES.has(facts.type)) return true;
   if (facts?.autocomplete && SENSITIVE_AUTOCOMPLETE.test(facts.autocomplete)) return true;
-  if (SENSITIVE_NAME.test(facts?.name ?? '') || SENSITIVE_NAME.test(facts?.id ?? '') || SENSITIVE_NAME.test(name)) {
+  if (
+    sensitiveName(facts?.name) ||
+    sensitiveName(facts?.id) ||
+    sensitiveName(facts?.placeholder) ||
+    sensitiveName(name)
+  ) {
     return true;
   }
   // Chrome already masks password values with bullets; keep them masked whatever the field says.
@@ -46,14 +60,23 @@ export function isSecretField(state: ProbeState | null | undefined, name: string
   if (!state) return false;
   if (state.type === 'password') return true;
   if (state.autocomplete && SENSITIVE_AUTOCOMPLETE.test(state.autocomplete)) return true;
-  return SENSITIVE_NAME.test(state.name ?? '') || SENSITIVE_NAME.test(state.id ?? '') || SENSITIVE_NAME.test(name);
+  return (
+    sensitiveName(state.name) || sensitiveName(state.id) || sensitiveName(state.placeholder) || sensitiveName(name)
+  );
 }
 
 /** The same rule over a live element's state, as the probe reads it at action time. */
 export function isSensitiveState(state: ProbeState | null | undefined, name: string): boolean {
   if (!state) return false;
   return isSensitiveField(
-    { tag: state.tag, type: state.type, autocomplete: state.autocomplete, name: state.name, id: state.id },
+    {
+      tag: state.tag,
+      type: state.type,
+      autocomplete: state.autocomplete,
+      name: state.name,
+      id: state.id,
+      placeholder: state.placeholder,
+    },
     name,
     state.value ?? '',
   );

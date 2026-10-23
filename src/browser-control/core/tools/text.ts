@@ -7,7 +7,7 @@ import type { OptionResult, ProbeState, SelectedOption } from '../../probe';
 import type { ToolContext, ToolOutcome } from '../controller';
 import { axIdentity } from '../interaction/resolve';
 import type { ResolvedTarget } from '../interaction/resolve';
-import { waitForActionable } from '../interaction/actionability';
+import { VIA_LABEL_NOTE, waitForActionable } from '../interaction/actionability';
 import { dispatchClick } from '../interaction/pointer';
 import type { DialogInfo } from '../interaction/pointer';
 import { KeyGuard, KeyPresser } from '../interaction/key-guard';
@@ -18,8 +18,10 @@ import { withEvidence } from '../interaction/evidence';
 import { focusedElement, preflightNavigation } from '../interaction/preflight';
 import { afterInput, assertJudged, confirmGate, gateTarget } from '../interaction/gate';
 import type { GateResult } from '../interaction/gate';
+import { classifyOption } from '../interaction/classify';
+import type { Classification } from '../interaction/classify';
 import { dispatchedKey, keyMode, splitChord, typedMode } from '../interaction/keys';
-import type { KeyMode } from '../interaction/keys';
+import type { KeyElement, KeyMode } from '../interaction/keys';
 import type { FrameRecord } from '../ports';
 import { checkCancelled } from '../controller';
 import { withPageState } from './navigate';
@@ -190,7 +192,7 @@ async function liveName(
 async function recheck(
   ctx: ToolContext,
   judged: Judged,
-  modeOf: (state: ProbeState) => KeyMode,
+  modeOf: (state: KeyElement) => KeyMode,
   delivered: boolean,
   what: string,
   next = 'the next key',
@@ -218,7 +220,7 @@ async function recheck(
       judged.gate,
       next,
     );
-    await preflightNavigation(ctx, judged.frame, objectId, mode, judged.description);
+    if (mode !== 'delete') await preflightNavigation(ctx, judged.frame, objectId, mode, judged.description);
   } catch (error) {
     throw afterInput(error, delivered, what);
   } finally {
@@ -269,14 +271,16 @@ async function setText(
   args: SetArgs,
   gate: GateResult,
 ): Promise<ToolOutcome> {
+  // Policy layer 2 and a Stop are checked before the click that focuses the field: once it is sent, a refusal could no
+  // longer say that nothing was dispatched. A Stop after it is caught by the key guard before the first unit.
+  if (args.submit) await preflightNavigation(ctx, target.frame, target.objectId, 'enter', target.description);
+  checkCancelled(ctx);
   await focusForText(ctx, target, args.timeoutMs);
   const { cdp } = await ctx.attach();
   const probe = ctx.tab().probe!;
   const before = await stateOf(ctx, target);
   const masked = sensitive(target, before) || sensitiveRequest(value);
   if (masked) rememberSecret(ctx.tab().secrets, value);
-  if (args.submit) await preflightNavigation(ctx, target.frame, target.objectId, 'enter', target.description);
-  checkCancelled(ctx);
   const options: KeyGuardOptions = {
     delivered: true,
     progress: arrived =>
@@ -380,6 +384,7 @@ async function setToggle(
     );
   }
   const receipt = receiptOf('set', target, 'pointer', {
+    ...(actionable.viaLabel ? { target: `[${target.record.ref}] ${target.description} (${VIA_LABEL_NOTE})` } : {}),
     dispatched: click.dispatched,
     reachedTarget: click.reachedTarget,
     effect: evidence.effect,
@@ -522,7 +527,7 @@ async function gateOn(
   ctx: ToolContext,
   target: ResolvedTarget,
   action: string,
-  mode: 'activate' | 'enter' | 'none',
+  mode: 'activate' | 'enter' | 'delete' | 'none',
   intent: string | undefined,
   needs: { pointer: boolean; editable?: boolean; budgetMs?: number },
   textInput = false,
@@ -534,6 +539,51 @@ async function gateOn(
     return { target: t };
   };
   const { state, gate } = await gateTarget(ctx, await prepare(target), { action, mode, intent, textInput }, prepare);
+  return { target: state.target, gate };
+}
+
+/** Which category outranks which, when one action is judged twice (the control, then the option it is set to). */
+const CATEGORY_RANK: Record<string, number> = { pay: 5, grant: 4, delete: 3, script: 3, submit: 2, upload: 2 };
+
+/** The gate result that counts for the receipt: the stronger category, and an approval from either gate. */
+function strongerGate(a: GateResult, b: GateResult | null): GateResult {
+  if (!b || !b.category) return a;
+  if (!a.category || (CATEGORY_RANK[b.category] ?? 0) > (CATEGORY_RANK[a.category] ?? 0)) {
+    return { ...b, confirmedByUser: b.confirmedByUser || a.confirmedByUser };
+  }
+  return { ...a, confirmedByUser: a.confirmedByUser || b.confirmedByUser };
+}
+
+/**
+ * Choosing an option of a select runs the page's change handlers, and "Delete" or "Cancel order" in an actions menu does
+ * what it says. Before anything is selected the options the request matches are judged by their labels (payment,
+ * access and destructive vocabulary), and a sensitive one goes through the gate like a click on a control of that name.
+ * A request that matches no option is left to `setSelect`, which reports it. Returns the (possibly re-resolved) target.
+ */
+export async function gateChosenOption(
+  ctx: ToolContext,
+  target: ResolvedTarget,
+  values: string[],
+  args: SetArgs,
+): Promise<{ target: ResolvedTarget; gate: GateResult | null }> {
+  const matched = await ctx.tab().probe!.call<OptionResult>(target.frame, target.objectId, 'matchOptions', values);
+  if (!matched.ok) return { target, gate: null };
+  let judged: Classification | null = null;
+  for (const option of matched.requested ?? []) {
+    for (const label of new Set([option.label, option.text ?? ''])) {
+      const found = label ? classifyOption(label, target.frame.url) : null;
+      if (found?.category && (CATEGORY_RANK[found.category] ?? 0) > (CATEGORY_RANK[judged?.category ?? ''] ?? 0)) {
+        judged = found;
+      }
+    }
+  }
+  if (!judged?.category) return { target, gate: null };
+  const { state, gate } = await gateTarget(
+    ctx,
+    { target },
+    { action: 'set', mode: 'none', intent: args.intent, category: judged.category, reason: judged.reason },
+    async t => ({ target: t }),
+  );
   return { target: state.target, gate };
 }
 
@@ -553,15 +603,17 @@ interface FocusedKey {
 async function gateFocused(
   ctx: ToolContext,
   action: string,
-  modeOf: (state: ProbeState) => KeyMode,
+  modeOf: (state: KeyElement) => KeyMode,
   intent: string | undefined,
   textInput = false,
 ): Promise<{ gate: GateResult; focused: FocusedKey | null }> {
   const focused = await focusedElement(ctx);
   if (!focused) {
+    // Keys sent with nothing focused go to the page itself (its keyboard shortcuts): only a delete shortcut is judged.
+    const onBody = modeOf({ tag: 'body', type: '' });
     const gate = await confirmGate(ctx, {
       action,
-      mode: 'none',
+      mode: onBody === 'delete' ? 'delete' : 'none',
       frame: (await (await ctx.attach()).topology.frames())[0],
       objectId: '',
       name: '',
@@ -699,12 +751,14 @@ export async function set(ctx: ToolContext, args: SetArgs): Promise<ToolOutcome>
         },
         true,
       );
+      // The option chosen is judged before it is selected (its change handler may delete, pay or send).
+      const option = await gateChosenOption(ctx, gated.target, values, args);
       return withReleased(
         ctx,
         target,
-        gated.target,
-        () => setSelect(ctx, gated.target, values, args, gated.gate),
-        gated.gate,
+        option.target,
+        () => setSelect(ctx, option.target, values, args, gated.gate),
+        strongerGate(gated.gate, option.gate),
       );
     }
     if (typeof args.value !== 'string')
@@ -771,7 +825,7 @@ export async function type(ctx: ToolContext, args: TypeArgs): Promise<ToolOutcom
   assertNoModal(ctx);
   await ctx.attach();
   // Typing presses a key for "\n", "\r" and " ": they submit or activate like press Enter or Space.
-  const modeOf = (state: ProbeState) => typedMode(args.text, !!args.submit, state);
+  const modeOf = (state: KeyElement) => typedMode(args.text, !!args.submit, state);
   const chars = [...args.text];
   const options: KeyGuardOptions = {
     delivered: false,
@@ -809,6 +863,9 @@ export async function type(ctx: ToolContext, args: TypeArgs): Promise<ToolOutcom
         target = gated.target;
       }
       gate = gated.gate;
+      // Policy layer 2 and a Stop are checked before the click that focuses the field, while nothing has been sent.
+      if (mode === 'enter') await preflightNavigation(ctx, target.frame, target.objectId, 'enter', target.description);
+      checkCancelled(ctx);
       await focusForText(ctx, target, args.timeoutMs);
     } else {
       await preflightKeys(ctx, null, modeOf);
@@ -818,9 +875,8 @@ export async function type(ctx: ToolContext, args: TypeArgs): Promise<ToolOutcom
     }
     const masked = sensitiveRequest(args.text) || (target ? sensitive(target, await stateOf(ctx, target)) : false);
     if (masked) rememberSecret(ctx.tab().secrets, args.text);
-    if (target && mode === 'enter')
-      await preflightNavigation(ctx, target.frame, target.objectId, 'enter', target.description);
-    checkCancelled(ctx);
+    // With a target the field was clicked by now: a Stop is caught by the key guard, which says what was sent.
+    if (!target) checkCancelled(ctx);
     const arm = () =>
       target
         ? KeyGuard.arm(ctx, guardedOf(target), { ...options, delivered: true })
@@ -905,7 +961,7 @@ export async function type(ctx: ToolContext, args: TypeArgs): Promise<ToolOutcom
 async function preflightKeys(
   ctx: ToolContext,
   target: ResolvedTarget | null,
-  modeOf: (state: ProbeState) => KeyMode,
+  modeOf: (state: KeyElement) => KeyMode,
 ): Promise<void> {
   const probe = ctx.tab().probe!;
   const focused = target ? null : await focusedElement(ctx);
@@ -915,7 +971,8 @@ async function preflightKeys(
   try {
     const state = await probe.call<ProbeState>(frame, objectId, 'state');
     const mode = modeOf(state);
-    if (mode === 'none') return;
+    // A delete shortcut navigates nowhere by itself: policy layer 2 has nothing to read.
+    if (mode === 'none' || mode === 'delete') return;
     await preflightNavigation(ctx, frame, objectId, mode, target?.description ?? `The focused ${state.tag}`);
   } finally {
     if (focused) await probe.release(focused.frame, focused.objectId);
@@ -941,8 +998,8 @@ export async function press(ctx: ToolContext, args: PressArgs): Promise<ToolOutc
     }
     // The chord as it will be pressed: an unknown key or modifier is refused before anything is sent.
     const chord = attachment.page.chord(args.keys);
-    const { key } = splitChord(args.keys);
-    const modeOf = (state: ProbeState) => keyMode(key, state);
+    const { key, modifiers } = splitChord(args.keys);
+    const modeOf = (state: KeyElement) => keyMode(key, state, modifiers);
     await preflightKeys(ctx, target, modeOf);
     let gate: GateResult;
     let judged: FocusedKey | null = null;
