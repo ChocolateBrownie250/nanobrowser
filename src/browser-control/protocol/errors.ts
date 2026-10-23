@@ -56,7 +56,7 @@ export const DEFAULT_HINTS: Record<ErrorCode, string> = {
   NOT_EDITABLE: 'The element does not accept text.',
   OBSCURED: 'Another element covers the target. Dismiss or interact with the covering element first.',
   INTERCEPTED:
-    'The page changed at the moment of the click and the click was cancelled before it reached the page. Take a new snapshot; retrying is safe.',
+    'The page changed at the moment of the input and the input was cancelled before it reached the page. Take a new snapshot and look at what changed first, then retry if the action is still needed.',
   NOT_INTERACTABLE: 'The element cannot be interacted with this way.',
   NO_SUCH_OPTION: 'None of the options matches. Choose one of the options listed.',
   AMBIGUOUS_OPTION: 'More than one option matches. Use the exact value or label.',

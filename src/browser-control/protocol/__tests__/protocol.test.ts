@@ -69,7 +69,9 @@ describe('errors', () => {
   });
 
   it('never calls a retry safe once input was delivered', () => {
-    expect(new LayerError('INTERCEPTED', 'cancelled').hint).toMatch(/retrying is safe/);
+    // Nothing sent: look first, then retry. The hint does not promise that a retry is harmless.
+    expect(new LayerError('INTERCEPTED', 'cancelled').hint).toMatch(/look at what changed first, then retry/);
+    expect(new LayerError('INTERCEPTED', 'cancelled').hint).not.toMatch(/retrying is safe/);
     for (const delivered of [true, 'unknown'] as const) {
       const hint = new LayerError('INTERCEPTED', 'part way', { delivered }).hint;
       expect(hint).not.toMatch(/retrying is safe/);

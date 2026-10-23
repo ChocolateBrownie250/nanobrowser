@@ -118,6 +118,38 @@ describe.skipIf(!chrome)('the probe in Chrome', () => {
     }
   });
 
+  describe('formFacts: text entry and search fields', () => {
+    type Facts = { textEntry: boolean; searchField: boolean };
+    const factsOf = async (html: string, selector: string): Promise<Facts> => {
+      const { page, call } = await withProbe(browser, `<!doctype html><body>${html}`);
+      try {
+        return (await call(selector, 'formFacts')) as Facts;
+      } finally {
+        await page.close();
+      }
+    };
+
+    it('a text box by role (without contenteditable) takes typed text, a button or link with that role does not', async () => {
+      expect((await factsOf('<div id="t" role="textbox" aria-label="Message"></div>', '#t')).textEntry).toBe(true);
+      expect((await factsOf('<div id="t" role="searchbox"></div>', '#t')).textEntry).toBe(true);
+      expect((await factsOf('<button id="t" role="textbox">Pay now</button>', '#t')).textEntry).toBe(false);
+      expect((await factsOf('<a id="t" href="/x" role="searchbox">Go</a>', '#t')).textEntry).toBe(false);
+      // A control inside an editing region inherits isContentEditable but is not a place to type.
+      expect((await factsOf('<div contenteditable><button id="t">Pay now</button></div>', '#t')).textEntry).toBe(false);
+      expect((await factsOf('<div contenteditable><span id="t">text</span></div>', '#t')).textEntry).toBe(true);
+      expect((await factsOf('<div id="t" contenteditable></div>', '#t')).textEntry).toBe(true);
+    });
+
+    it('recognises search fields in English, Simplified and Traditional Chinese, outside any form', async () => {
+      for (const word of ['Search', '搜索', '搜尋', '搜寻', '查詢', '查询', '查詢商品', '查找', '尋找商品', '検索']) {
+        const facts = await factsOf(`<input id="t" type="text" placeholder="${word}">`, '#t');
+        expect(facts.searchField, word).toBe(true);
+      }
+      expect((await factsOf('<input id="t" type="text" placeholder="Your message">', '#t')).searchField).toBe(false);
+      expect((await factsOf('<input id="t" type="text" placeholder="留言">', '#t')).searchField).toBe(false);
+    });
+  });
+
   describe('select options', () => {
     const html = `<!doctype html><select id="s"><option value="a">Keep</option><option value="b">Delete account</option>
       <option value="c" label="Archive">Move to archive</option></select>`;

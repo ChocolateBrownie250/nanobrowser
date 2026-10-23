@@ -121,6 +121,8 @@ scenario(
   'React dropzones',
   async ctx => {
     const u = await uploadSession(ctx);
+    // A semantic target binds only to elements the agent was shown.
+    await u.call('snapshot');
     await u.call('click', { target: { role: 'button', name: 'Drop files here' } });
     await sleep(300);
     const r = await u.call('upload', {
@@ -134,6 +136,8 @@ scenario(
 
 scenario('U-8.3-dismiss', 'A file chooser is dismissed with handle_dialog', 'modal states', async ctx => {
   const u = await uploadSession(ctx);
+  // A semantic target binds only to elements the agent was shown.
+  await u.call('snapshot');
   await u.call('click', { target: { role: 'button', name: 'Choose a file' } });
   await sleep(300);
   const accept = await u.call('handle_dialog', { accept: true });

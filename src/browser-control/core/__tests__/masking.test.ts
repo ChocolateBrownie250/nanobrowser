@@ -145,6 +145,31 @@ describe('secret fields named in Chinese, and card and PIN codes', () => {
     expect(isSecretField(state({ id: 'shipping' }), '')).toBe(false);
   });
 
+  it('prints a postal PIN code, but keeps masking a secret PIN', () => {
+    // The browser says it is a postal code, or the label has address words and no secret ones.
+    expect(field('pin_code', 'PIN code', { autocomplete: 'postal-code' })).toBe(false);
+    expect(field('pin', '', { autocomplete: 'postal-code' })).toBe(false);
+    expect(field('postal_pin', 'Postal PIN code')).toBe(false);
+    expect(field('pin_code', 'PIN code of your delivery address')).toBe(false);
+    expect(field('pin_code', 'Area PIN')).toBe(false);
+    expect(field('x', '', { placeholder: 'Enter 6 digit PIN code of the city' })).toBe(false);
+    expect(isSecretField(state({ name: 'pin_code', autocomplete: 'postal-code' }), 'PIN code')).toBe(false);
+    expect(isSecretField(state({ name: 'pin_code' }), 'PIN code (postal address)')).toBe(false);
+    expect(isSensitiveState(state({ name: 'pin', autocomplete: 'postal-code', value: '560001' }), 'PIN')).toBe(false);
+    // A PIN with nothing that says postal is a secret, and so is anything with a secret word next to it.
+    expect(field('pin', 'PIN')).toBe(true);
+    expect(field('pin_code', 'PIN code')).toBe(true);
+    expect(field('pin_code', 'Enter your PIN code')).toBe(true);
+    expect(field('atm_pin', 'ATM PIN')).toBe(true);
+    expect(field('pin', 'Card PIN')).toBe(true);
+    expect(field('pin', 'Security PIN for your account address')).toBe(true);
+    expect(field('pin', 'Verification PIN')).toBe(true);
+    expect(field('pin', 'PIN', { autocomplete: 'one-time-code' })).toBe(true);
+    expect(field('pin', 'Postal PIN', { type: 'password' })).toBe(true);
+    expect(isSecretField(state({ name: 'pin' }), 'PIN')).toBe(true);
+    expect(isSecretField(state({ name: 'pin', autocomplete: 'one-time-code' }), 'Delivery area PIN')).toBe(true);
+  });
+
   it('also reads the placeholder, so an unlabelled field is still masked', () => {
     expect(field('f1', '', { placeholder: '请输入验证码' })).toBe(true);
     expect(field('f1', '', { placeholder: '請輸入密碼' })).toBe(true);

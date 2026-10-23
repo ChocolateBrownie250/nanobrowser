@@ -18,13 +18,34 @@ export interface KeyElement {
   role?: string;
 }
 
+/** Tags that are controls, not places to type: whatever editing region they sit in or role they carry, keys activate them. */
+const CONTROL_TAGS = new Set(['button', 'a', 'area', 'summary', 'select', 'option', 'input', 'textarea']);
+/** Roles of activating controls. An element with one of these is activated by keys, not typed into. */
+const CONTROL_ROLES = new Set([
+  'button',
+  'link',
+  'checkbox',
+  'radio',
+  'switch',
+  'menuitem',
+  'menuitemcheckbox',
+  'menuitemradio',
+  'tab',
+  'option',
+  'treeitem',
+]);
+
 /**
- * An element that is a text-editing host without being a native field: a contenteditable element, or one whose role
- * says it is a text box or search box. Chat, comment and composer widgets are built this way, and the keys typed into
- * them edit text, while Enter often sends.
+ * An element that is a text-editing host without being a native field: a contenteditable element (or text inside
+ * one), or one whose role says it is a text box or search box. Chat, comment and composer widgets are built this way,
+ * and the keys typed into them edit text, while Enter often sends. The element's own tag and role are judged first:
+ * every descendant of an editing region reports `contentEditable`, and a role can be put on anything, so a button, a
+ * link or a `role=button` element in such a region (or a button given `role=textbox`) is a control that the keys
+ * activate, not a place to type. Native inputs and textareas are decided by their tag and type, not here.
  */
 export function editsTextHost(el: KeyElement): boolean {
   const role = (el.role ?? '').trim().toLowerCase();
+  if (CONTROL_TAGS.has(el.tag) || CONTROL_ROLES.has(role)) return false;
   return !!el.contentEditable || role === 'textbox' || role === 'searchbox';
 }
 
@@ -42,6 +63,10 @@ export function splitChord(keys: string): { modifiers: string[]; key: string } {
 export function dispatchedKey(key: string): string {
   if (key === 'Enter' || key === 'NumpadEnter' || key === '\r' || key === '\n') return 'Enter';
   if (key === ' ' || key === 'Space') return 'Space';
+  // The numpad's decimal key (and the NUL character, which the layout maps to it) sends the key code of Delete.
+  if (key === 'NumpadDecimal' || key === '\u0000') return 'Delete';
+  // Shift+Digit3 is `#`: the layout names the physical key, and the chord supplies the Shift.
+  if (key === 'Digit3') return '3';
   return key;
 }
 
@@ -64,9 +89,10 @@ export function editsText(el: KeyElement): boolean {
 }
 
 /**
- * Whether a key is a delete shortcut when it goes to something that is not a text field: Delete, Backspace and `#`
- * (Shift+3), which pages bind to "delete the selected item" (a mail list, a file list, a board). Best effort: printable
- * letters are not judged. `modifiers` are the chord's other parts.
+ * Whether a key is a delete shortcut when it goes to something that is not a text field: Delete (the numpad's one
+ * included), Backspace and `#` (Shift+3, however the layout names the key), which pages bind to "delete the selected
+ * item" (a mail list, a file list, a board). Best effort: printable letters are not judged. `key` is the dispatched
+ * key (`dispatchedKey`); `modifiers` are the chord's other parts.
  */
 function deleteShortcut(key: string, modifiers: readonly string[]): boolean {
   if (key === 'Delete' || key === 'Backspace' || key === '#') return true;
@@ -116,8 +142,9 @@ const STRENGTH: Record<KeyMode, number> = { none: 0, activate: 1, enter: 2, dele
 export function typedMode(text: string, submit: boolean, el: KeyElement): KeyMode {
   const typed = typedKey(text);
   const fromKey: KeyMode = typed && el.tag !== 'textarea' ? keyMode(typed, el) : 'none';
-  // A typed `#` is a key press too: outside a text field it can be a delete shortcut.
-  const fromHash: KeyMode = text.includes('#') ? keyMode('#', el) : 'none';
+  // A typed `#` (or the NUL character, which the layout types as the numpad's Delete) is a key press too: outside a
+  // text field it can be a delete shortcut.
+  const fromHash: KeyMode = text.includes('#') || text.includes('\u0000') ? keyMode('#', el) : 'none';
   const fromText = STRENGTH[fromHash] > STRENGTH[fromKey] ? fromHash : fromKey;
   const fromSubmit = submit ? keyMode('Enter', el) : 'none';
   return STRENGTH[fromSubmit] >= STRENGTH[fromText] ? fromSubmit : fromText;

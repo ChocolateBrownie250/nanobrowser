@@ -21,7 +21,10 @@ export async function preflightNavigation(
     throw new LayerError(
       'URL_NOT_ALLOWED',
       `Where ${description} would navigate could not be read, so the policy cannot be checked. Nothing was dispatched.`,
-      { delivered: false },
+      {
+        delivered: false,
+        hint: 'The destination could not be read. Take a new snapshot and try again.',
+      },
     );
   });
   if (!nav) return null;

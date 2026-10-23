@@ -52,20 +52,47 @@ export const PAY_WORDS = vocabulary(
     '购买',
     '下单',
     '结账',
+    '结帐',
     '结算',
     '充值',
-    // Not 取消订阅 (cancel a subscription), which is a deletion.
+    // Not 取消订阅 (cancel a subscription), which is a deletion; likewise for an order, a booking or an automatic
+    // renewal that is cancelled.
     '(?<!取消)订阅',
+    '(?<!取消)订购',
+    '(?<!取消)预订',
+    '(?<!取消)下订',
+    '(?<!(?:取消|关闭)(?:自动)?)续费',
+    '付费',
+    '买单',
+    '提交订单',
+    '确认订单',
     '转账',
+    '转帐',
+    '汇款',
     '捐款',
-    // Traditional (the characters that differ)
+    '打赏',
+    '赞助',
+    // Traditional (the characters that differ, and the words Taiwan and Hong Kong use)
     '購買',
     '下單',
     '結帳',
+    '結賬',
     '結算',
     '儲值',
     '(?<!取消)訂閱',
+    '(?<!取消)訂購',
+    '(?<!取消)預訂',
+    '(?<!取消)下訂',
+    '(?<!(?:取消|關閉)(?:自動)?)續費',
+    '付費',
+    '買單',
+    '提交訂單',
+    '確認訂單',
     '轉帳',
+    '轉賬',
+    '匯款',
+    '打賞',
+    '贊助',
   ],
 );
 export const DELETE_WORDS = vocabulary(
@@ -86,7 +113,38 @@ export const DELETE_WORDS = vocabulary(
     'cancel order',
     'close account',
   ],
-  ['删除', '移除', '清空', '注销', '取消订阅', '刪除', '註銷', '取消訂閱'],
+  [
+    // Simplified
+    '删除',
+    '移除',
+    '清空',
+    '注销',
+    '取消订阅',
+    '取消订单',
+    '取消预订',
+    '取消会员',
+    '取消续费',
+    '关闭自动续费',
+    '退订',
+    '关闭账户',
+    '关闭账号',
+    '销毁',
+    '丢弃',
+    // Traditional
+    '刪除',
+    '註銷',
+    '取消訂閱',
+    '取消訂單',
+    '取消預訂',
+    '取消會員',
+    '取消續費',
+    '關閉自動續費',
+    '退訂',
+    '關閉帳戶',
+    '關閉帳號',
+    '銷毀',
+    '丟棄',
+  ],
 );
 export const SUBMIT_WORDS = vocabulary(
   [
@@ -116,13 +174,30 @@ export const SUBMIT_WORDS = vocabulary(
     '批准',
     '拒绝',
     '驳回',
-    // Traditional (the characters that differ)
+    '发表',
+    '发出',
+    '传送',
+    '寄出',
+    '注册',
+    '申请',
+    '登记',
+    '存档',
+    // Traditional (the characters that differ, and the words Taiwan and Hong Kong use)
+    '送出',
     '發送',
     '發布',
+    '發佈',
+    '發表',
+    '發出',
+    '傳送',
     '確認',
     '儲存',
+    '存檔',
     '創建',
     '建立',
+    '註冊',
+    '申請',
+    '登記',
     '拒絕',
     '駁回',
   ],
@@ -148,9 +223,15 @@ function onConsentPage(url: string | undefined): boolean {
     return false;
   }
 }
-/** A generic confirmation label: pay when a money amount is next to it. */
+
+/**
+ * A generic confirmation label: pay when a money amount is next to it. The English words match at a word boundary.
+ * The Chinese ones must be the whole label, with at most punctuation, symbols, spaces or digits (an amount) after
+ * them: a longer label such as 继续购物 ("continue shopping") or 确认收货 ("confirm receipt") says what it does and is
+ * not a payment because a price sits nearby.
+ */
 export const GENERIC_CONFIRM =
-  /^(?:(?:confirm|ok|okay|continue|next|proceed|agree|submit|yes)(?:\b|$)|确认|確認|确定|確定|继续|繼續|下一步)/i;
+  /^(?:(?:confirm|ok|okay|continue|next|proceed|agree|submit|yes)(?:\b|$)|(?:确认|確認|确定|確定|继续|繼續|下一步)(?=$|[\s\p{P}\p{S}\d]))/iu;
 const DELETE_CLASSES = /(^|[\s_-])(delete|remove|destroy|trash|discard)([\s_-]|$)/i;
 
 export interface ClassifyInput {
@@ -193,13 +274,48 @@ export function classifyShortcut(): Classification {
 }
 
 /**
- * What choosing a menu option does, judged by its label alone: payment, access and destructive vocabulary (a "Delete"
- * or "Cancel order" option of an actions menu). Submission vocabulary is left out on purpose: "Update" or "Save" among
- * a select's options is more often a sort order or a setting than a submission. Null when the label says nothing.
+ * A label that is, as a whole, a command to pay: "Pay now", "Place order", "Checkout", "立即支付", "提交订单". A select's
+ * options are choices before they are commands, so a payment word inside a longer or plainer label ("Buy", "Pay on
+ * delivery", "Subscribe weekly", "货到付款") is not one. Only a label that can mean nothing but paying is.
+ */
+const PAY_COMMAND = new RegExp(
+  `^(?:${[
+    'pay now',
+    'buy now',
+    'order now',
+    'purchase now',
+    'donate now',
+    'check\\s*out(?: now)?',
+    'place (?:the |your |my )?order',
+    'complete (?:the |your |my )?(?:order|purchase|payment|booking)',
+    'confirm (?:and|&) pay',
+    'pay (?:and|&) confirm',
+    'confirm (?:the |your |my )?(?:order|purchase|payment)',
+    '(?:立即|马上|馬上|确认|確認|去)(?:付款|支付|购买|購買|下单|下單|结账|结帐|結帳|結賬|结算|結算|订购|訂購)',
+    '(?:提交|确认|確認)(?:订单|訂單)',
+  ].join('|')})[\\s\\p{P}\\p{S}]*$`,
+  'iu',
+);
+
+/**
+ * What choosing a menu option does, judged by its label alone. Destructive vocabulary ("Delete account", "Cancel
+ * order", "Move to Trash") and access vocabulary are judged as for a control, because choosing such an option does what
+ * it says wherever the page acts on the choice. Payment is narrower: only a label that is a command to pay as a whole
+ * (PAY_COMMAND), since "Buy", "Pay on delivery" or "Subscribe weekly" are ordinary choices in a dropdown. Submission
+ * vocabulary is left out on purpose: "Update" or "Save" among a select's options is more often a sort order or a
+ * setting than a submission. Null when the label says nothing.
  */
 export function classifyOption(label: string, url?: string): Classification | null {
-  const named = byName(label.trim(), '', url);
-  return named ? { ...named, reason: `the option ${named.reason.replace(/^the name /, '')}` } : null;
+  const text = label.trim();
+  if (PAY_COMMAND.test(text)) return { category: 'pay', reason: `the option ${quote(text)} is a payment command` };
+  if (GRANT_WORDS.test(text)) return { category: 'grant', reason: `the option ${quote(text)} grants access` };
+  if (AFFIRMATIVE.test(text) && onConsentPage(url)) {
+    return { category: 'grant', reason: `the option ${quote(text)} on a consent page` };
+  }
+  if (DELETE_WORDS.test(text)) {
+    return { category: 'delete', reason: `the option ${quote(text)} is destructive vocabulary` };
+  }
+  return null;
 }
 
 /**

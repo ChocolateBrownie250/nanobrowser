@@ -216,13 +216,13 @@ export async function read(
   }
   const content = renderContent(roots, args.format ?? 'markdown');
   const offset = args.offset ?? 0;
-  const { text, remaining } = sliceContent(content, offset, args.maxChars ?? 20_000);
+  const { text, remaining, start, next } = sliceContent(content, offset, args.maxChars ?? 20_000);
   const notices = [
-    ...(remaining ? [`… ${remaining} more characters; continue with offset ${offset + text.length}.`] : []),
+    ...(remaining ? [`… ${remaining} more characters; continue with offset ${next}.`] : []),
     ...observation.captureNotices,
   ];
   return {
-    data: { content: text, offset, remaining },
+    data: { content: text, offset: start, remaining },
     lines: [`read · tab ${tab.tabId} · ${quote(observation.title)} · ${text.length} characters`],
     pageText: text,
     notices,

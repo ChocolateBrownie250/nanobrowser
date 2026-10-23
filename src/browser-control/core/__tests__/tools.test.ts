@@ -280,6 +280,21 @@ describe('choosing an option of a select is judged by the option', () => {
     expect(prompt.confirm).not.toHaveBeenCalled();
   });
 
+  it('a plain choice such as Buy, Pay on delivery or Subscribe weekly is selected without asking, even in a hand-over session', async () => {
+    const prompt = scriptedPrompt('decline');
+    for (const label of ['Buy', 'Pay on delivery', 'Subscribe weekly']) {
+      const h = await makeHarness({
+        config: { handover: true },
+        prompt,
+        probe: { matchOptions: () => optionsOf(label) },
+      });
+      await expect(gateChosenOption(h.ctx, selectTarget(), [label], args(label))).resolves.toMatchObject({
+        gate: null,
+      });
+    }
+    expect(prompt.confirm).not.toHaveBeenCalled();
+  });
+
   it('runs a Delete option without asking in Auto mode, and the gate says it was a delete', async () => {
     const prompt = scriptedPrompt('decline');
     const h = await makeHarness({

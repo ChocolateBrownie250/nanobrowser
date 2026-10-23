@@ -11,6 +11,7 @@ import { decodeSnapshot } from './layout';
 import type { LayoutDocument } from './layout';
 import { enrichFrame } from './enrich';
 import { siteOf } from '../site';
+import { sliceWhole } from '../text';
 
 /** Roles that get a ref (agent-browser's interactive roles, plus Chrome's role for <summary>). */
 export const INTERACTIVE_ROLES = new Set([
@@ -373,7 +374,7 @@ export function buildFrameTree(frame: FrameCapture, stats: TreeStats = { deepCut
     } else if (SELECT_ROLES.has(raw)) {
       maskOptions(children, isSensitiveField(frame.fields[String(node.backendDOMNodeId)], name, ''));
     }
-    if (raw === 'row' && !name) out.name = cleanText(collectText(children)).slice(0, 120);
+    if (raw === 'row' && !name) out.name = sliceWhole(cleanText(collectText(children)), 120);
     // Chrome puts the value of a text field into the name of an element that is named from its content and contains
     // the field (a custom radio or tab wrapping it, a heading). A value masked inside this element, or its own, is
     // replaced in its name too; the name as Chrome gave it is kept for revalidation, never printed.
@@ -697,7 +698,7 @@ export function interactiveOnly(nodes: ONode[]): ONode[] {
 const MAX_TEXT = 160;
 
 export function quote(s: string, max = MAX_TEXT): string {
-  const t = s.length > max ? `${s.slice(0, max - 1)}…` : s;
+  const t = s.length > max ? `${sliceWhole(s, max - 1)}…` : s;
   return `"${t.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n')}"`;
 }
 

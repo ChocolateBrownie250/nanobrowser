@@ -751,11 +751,28 @@ export function probeMain(): void {
       for (const box of [el, nodeProp(el, 'parentElement') as Element | null]) {
         if (!money && box) money = findMoney((htmlProp(box, 'innerText') ?? '').trim());
       }
+      const role = (attrOf(el, 'role') ?? '').trim().toLowerCase();
+      // A place to type: a text field, an editing region (a control inside one inherits that and is not a place to
+      // type), or an element that says it is a text box or search box.
+      const control =
+        ['button', 'a', 'area', 'summary', 'select'].includes(tag) ||
+        [
+          'button',
+          'link',
+          'checkbox',
+          'radio',
+          'switch',
+          'menuitem',
+          'menuitemcheckbox',
+          'menuitemradio',
+          'tab',
+          'option',
+          'treeitem',
+        ].includes(role);
       const textEntry =
         tag === 'textarea' ||
-        htmlProp(el, 'isContentEditable') === true ||
-        (tag === 'input' && [...BLOCKING, ''].includes(type) && type !== 'password');
-      const role = (attrOf(el, 'role') ?? '').toLowerCase();
+        (tag === 'input' && [...BLOCKING, ''].includes(type) && type !== 'password') ||
+        (!control && (htmlProp(el, 'isContentEditable') === true || role === 'textbox' || role === 'searchbox'));
       const words = [attrOf(el, 'name'), attrOf(el, 'placeholder'), attrOf(el, 'aria-label'), elemProp(el, 'id')]
         .filter(Boolean)
         .join(' ');
@@ -764,7 +781,7 @@ export function probeMain(): void {
         role === 'searchbox' ||
         role === 'combobox' ||
         !!elemCall(el, 'closest', '[role=search], search') ||
-        /\b(search|query|find|lookup)\b|^q$|搜索|查找|検索/i.test(words);
+        /\b(search|query|find|lookup)\b|^q$|搜索|搜尋|搜寻|查找|尋找|寻找|查詢|查询|検索/i.test(words);
       return {
         tag,
         type,

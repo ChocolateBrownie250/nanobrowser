@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { FormFacts } from '../../probe';
-import { AFFIRMATIVE, classify, enterSubmits } from '../interaction/classify';
+import { AFFIRMATIVE, classify, classifyOption, enterSubmits } from '../interaction/classify';
 import { keyMode } from '../interaction/keys';
 
 const plain: FormFacts = {
@@ -290,5 +290,186 @@ describe('enrichments', () => {
 
   it('Enter in a form whose default button is "Create" submits it', () => {
     expect(enter({ form: form({ defaultButton: { name: 'Create', disabled: false } }) })).toBe('submit');
+  });
+});
+
+describe('Chinese vocabulary: the labels shops in Taiwan, Hong Kong and the mainland actually use', () => {
+  it('pay: order, fee and checkout variants in both scripts', () => {
+    for (const name of [
+      '訂購',
+      '订购',
+      '立即訂購',
+      '立即订购',
+      '付費',
+      '付费',
+      '結賬',
+      '结帐',
+      '提交订单',
+      '提交訂單',
+      '确认订单',
+      '確認訂單',
+      '轉賬',
+      '转帐',
+      '匯款',
+      '汇款',
+      '買單',
+      '买单',
+      '下訂',
+      '下订',
+      '預訂',
+      '预订',
+      '打賞',
+      '打赏',
+      '贊助',
+      '赞助',
+      '續費',
+      '续费',
+    ]) {
+      expect(activate(name), name).toBe('pay');
+    }
+    // A subscription that is cancelled is still a deletion, and the other pay words do not hide behind it.
+    expect(activate('取消訂閱')).toBe('delete');
+    expect(activate('取消订阅')).toBe('delete');
+  });
+
+  it('delete: cancelling an order or a booking, unsubscribing, closing an account', () => {
+    for (const name of [
+      '取消订单',
+      '取消訂單',
+      '取消預訂',
+      '取消预订',
+      '退訂',
+      '退订',
+      '取消會員',
+      '取消会员',
+      '關閉帳戶',
+      '关闭账户',
+      '銷毀',
+      '销毁',
+      '丟棄',
+      '丢弃',
+    ]) {
+      expect(activate(name), name).toBe('delete');
+    }
+  });
+
+  it('submit: send, publish, post, register and apply in both scripts', () => {
+    for (const name of [
+      '送出',
+      '發佈',
+      '發表',
+      '发表',
+      '傳送',
+      '传送',
+      '寄出',
+      '發出',
+      '发出',
+      '註冊',
+      '注册',
+      '申請',
+      '申请',
+      '存檔',
+      '登記',
+      '登记',
+    ]) {
+      expect(activate(name), name).toBe('submit');
+    }
+    // Signing in and out is not a write.
+    for (const name of ['登录', '登入', '登出', '登錄', '搜索', '搜尋', '查詢', '取消', '返回', '繼續購物']) {
+      expect(activate(name), name).toBeNull();
+    }
+  });
+});
+
+describe('a generic Chinese confirmation matches as the whole label, not as a prefix', () => {
+  it('"continue shopping" and "confirm receipt" next to a price are not payments', () => {
+    for (const name of ['继续购物', '繼續購物', '确认收货', '確認收貨', '继续浏览', '下一步骤', '确定要离开吗']) {
+      // Not a payment (a word like 确认 can still be a plain submission).
+      expect(activate(name, { money: '¥99' }), name).not.toBe('pay');
+    }
+    expect(activate('继续购物', { money: '¥99' })).toBeNull();
+    expect(activate('确认收货', { money: '¥99' })).toBe('submit');
+    // The real confirmations still are, with or without punctuation, spaces or the amount in the label.
+    for (const name of [
+      '确认',
+      '确认。',
+      '確認！',
+      '确定 ',
+      '继续>',
+      '繼續 »',
+      '下一步 →',
+      '确认 ¥99',
+      '確認$49',
+      '继续（¥99）',
+    ]) {
+      expect(activate(name, { money: '¥99' }), name).toBe('pay');
+    }
+  });
+});
+
+describe('what choosing a select option is gated for', () => {
+  const cls = (label: string) => classifyOption(label)?.category ?? null;
+
+  it('an ordinary choice is not consequential, even with a payment or subscription word in it', () => {
+    for (const label of [
+      'Buy',
+      'Buy / Sell',
+      'Buy or rent',
+      'Pay on delivery',
+      'Pay by card',
+      'Pay later',
+      'Payment method',
+      'Subscribe weekly',
+      'Subscribe',
+      'Top up',
+      'Donate monthly',
+      '购买',
+      '按月订阅',
+      '货到付款',
+      '支付方式',
+      'Save',
+      'Newest first',
+    ]) {
+      expect(cls(label), label).toBeNull();
+    }
+  });
+
+  it('a label that is a command to pay or order is still handed over', () => {
+    for (const label of [
+      'Pay now',
+      'Pay now!',
+      'Buy now',
+      'Place order',
+      'Place your order',
+      'Complete purchase',
+      'Confirm and pay',
+      'Checkout',
+      'Order now',
+      '立即支付',
+      '立即购买',
+      '立即購買',
+      '提交订单',
+      '確認支付',
+    ]) {
+      expect(cls(label), label).toBe('pay');
+    }
+  });
+
+  it('destructive and access labels keep failing closed', () => {
+    for (const label of [
+      'Delete',
+      'Delete account',
+      'Move to Trash',
+      'Remove from list',
+      'Cancel order',
+      'Unsubscribe',
+      '删除账户',
+      '刪除帳號',
+      '取消订单',
+    ]) {
+      expect(cls(label), label).toBe('delete');
+    }
+    expect(cls('Authorize')).toBe('grant');
+    expect(cls('授权')).toBe('grant');
   });
 });

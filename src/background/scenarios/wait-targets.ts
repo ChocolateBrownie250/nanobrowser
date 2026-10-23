@@ -16,6 +16,9 @@ defineScenario({
   covers: 'a semantic target that is not there yet is waited for, with a fresh capture each poll',
   async run(ctx) {
     await ctx.open(PAGE);
+    // A semantic target binds only to elements the agent was shown: "Start" is on a snapshot before it is clicked.
+    // "Continue" is not on the page yet, and is waited for without having been shown (a wait only reads).
+    await ctx.call('snapshot');
     const start = await ctx.call('click', { target: { role: 'button', name: 'Start' } });
     // A capture just before the wait: the page then changes without an action, within the 2 s a capture is reused.
     const snap = await ctx.call('snapshot');
@@ -43,6 +46,8 @@ defineScenario({
   covers: 'no match is absence, so "hidden" and "detached" are met by a missing target',
   async run(ctx) {
     await ctx.open(PAGE);
+    // "Start" is clicked below by role and name, which binds only to an element the agent was shown.
+    await ctx.call('snapshot');
     const hidden = await ctx.call('wait', { target: CONTINUE, state: 'hidden', timeoutMs: 1_000 });
     const detached = await ctx.call('wait', { target: CONTINUE, state: 'detached', timeoutMs: 1_000 });
     const start = await ctx.call('click', { target: { role: 'button', name: 'Start' } });

@@ -74,7 +74,7 @@ describe('INTERCEPTED says what the guard can and cannot promise', () => {
     const error = await rejection(guard.unit(async () => undefined));
     expect(error.code).toBe('INTERCEPTED');
     expect(error.delivered).toBe(false);
-    expect(error.hint).toMatch(/retrying is safe/);
+    expect(error.hint).toMatch(/look at what changed first, then retry/);
     await guard.disarm();
   });
 
@@ -203,6 +203,9 @@ describe('preflight fails closed when the navigation target cannot be read', () 
     expect(error.code).toBe('URL_NOT_ALLOWED');
     expect(error.delivered).toBe(false);
     expect(error.message).toContain('could not be read');
+    // An unreadable destination is not an address-policy refusal, and the hint does not say it is.
+    expect(error.hint).toContain('could not be read');
+    expect(error.hint).not.toMatch(/not allowed|policy/);
   });
 
   it('a LayerError from the policy passes through unchanged', async () => {

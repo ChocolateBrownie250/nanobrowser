@@ -184,6 +184,8 @@ defineScenario({
   covers: 'a semantic target must match exactly one node; AMBIGUOUS_TARGET, NO_MATCH',
   async run(ctx) {
     await ctx.open(`${FIXTURE_ORIGIN}/c-states.html`);
+    // A semantic target binds only to elements the agent was shown, so the page is snapshotted first.
+    await ctx.call('snapshot');
     const one = await inspect(ctx, { role: 'button', name: 'Rename me' });
     const many = await inspect(ctx, { role: 'button' });
     const none = await inspect(ctx, { role: 'button', name: 'Nope' });

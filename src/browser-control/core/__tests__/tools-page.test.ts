@@ -123,6 +123,40 @@ describe('press: which keys ask the user', () => {
   });
 });
 
+describe('press: a control is judged as itself whatever editing region or role it sits in', () => {
+  async function pressPay(keys: string, own: Partial<ProbeState>) {
+    const sent: string[] = [];
+    const p = prompt('approve');
+    const h = await makeHarness({
+      config: { handover: true },
+      prompt: p,
+      page: keyPort(sent),
+      probe: pageProbe({
+        state: () => state({ tag: 'button', type: 'submit', ...own }),
+        formFacts: () => facts({ tag: 'button', type: 'submit' }),
+      }),
+      cdpReply: pageCdp(),
+    });
+    const ref = showElement(h, { role: 'button', name: 'Pay now', tag: 'button' });
+    const error = await rejection(press(h.ctx, { target: { ref }, keys } as never));
+    return { error, sent, p };
+  }
+
+  for (const keys of ['Space', 'Enter']) {
+    it(`${keys} on a "Pay now" button inside a contenteditable region is the user's step`, async () => {
+      const { error, sent } = await pressPay(keys, { contentEditable: true });
+      expect(error.code).toBe('USER_STEP');
+      expect(sent).toEqual([]);
+    });
+
+    it(`${keys} on a "Pay now" button with role=textbox is the user's step`, async () => {
+      const { error, sent } = await pressPay(keys, { role: 'textbox' });
+      expect(error.code).toBe('USER_STEP');
+      expect(sent).toEqual([]);
+    });
+  }
+});
+
 describe('click through a hidden input’s label is named in the receipt', () => {
   async function clickCheckbox(visible: boolean) {
     const h = await makeHarness({
